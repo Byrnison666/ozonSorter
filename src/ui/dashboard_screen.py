@@ -46,7 +46,7 @@ class DashboardScreen(QWidget):
         drop_layout = QVBoxLayout(self.drop_zone)
         drop_layout.setContentsMargins(20, 28, 20, 28)
         drop_layout.setSpacing(10)
-        drop_layout.setAlignment(Qt.AlignCenter)
+        drop_layout.addStretch()
 
         drop_title = QLabel("Загрузите файл от Казакова 68")
         drop_title.setObjectName("h2")
@@ -69,6 +69,7 @@ class DashboardScreen(QWidget):
         self.import_btn.clicked.connect(self.on_import)
         btn_row.addWidget(self.import_btn)
         drop_layout.addLayout(btn_row)
+        drop_layout.addStretch()
 
         layout.addWidget(self.drop_zone)
 
