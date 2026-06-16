@@ -42,6 +42,21 @@ pip install -r requirements.txt
 python -m src.main
 ```
 
+### Linux dev-окружение (зеркало Win8.0)
+Системный Python 3.12 не годится (нет колёс PySide2). Используется portable
+CPython 3.8.20 от python-build-standalone (с вшитыми sqlite/ssl, без sudo):
+- интерпретатор: `~/.local/python38/bin/python3.8`
+- venv проекта: `.venv` (создан этим интерпретатором)
+
+PySide2 на Ubuntu 24.04 не стартует из-за отсутствия `libxcb-xinerama.so.0`
+(её нет в системе, ставится `sudo apt install libxcb-xinerama0`). Без sudo
+библиотека извлечена из .deb в `~/.local/qtlibs`. Запуск GUI:
+```
+DISPLAY=:1 LD_LIBRARY_PATH="$HOME/.local/qtlibs:$LD_LIBRARY_PATH" .venv/bin/python -m src.main
+```
+Smoke-тест без дисплея: `QT_QPA_PLATFORM=offscreen .venv/bin/python -c '...'`
+(собрать MainWindow и выйти по таймеру — main.py сам блокируется в exec_).
+
 ## Где лежат данные
 `database.py` кладёт БД в `%APPDATA%/OzonSorter/ozon_sorter.db`. На Linux `APPDATA`
 не задан → fallback в `~/OzonSorter/`. Бэкапы — `<APP_DATA_DIR>/backups/*.db.bak`.
@@ -62,3 +77,6 @@ pyinstaller --noconsole --name OzonSorter \
 - В исходнике зашиты доменные строки («Казаков 68», «Комсомольская 4», «Кольцевая 16»)
   — вероятно, есть и другие хардкоды адресов/клиентов. Искать перед изменением логики.
 - Точные версии зависимостей не зафиксированы (см. requirements.txt).
+- Косметика под Qt5: на дашборде в карточке импорта текст-описание перекрывается
+  кнопкой «Выбрать файл…» (наезд по вертикали). Похоже на фикс. высоту карточки или
+  spacing лейбла в QSS/layout — поправить в dashboard_screen.py / theme.py.
