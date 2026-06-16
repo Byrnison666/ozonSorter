@@ -61,16 +61,25 @@ Smoke-тест без дисплея: `QT_QPA_PLATFORM=offscreen .venv/bin/pytho
 `database.py` кладёт БД в `%APPDATA%/OzonSorter/ozon_sorter.db`. На Linux `APPDATA`
 не задан → fallback в `~/OzonSorter/`. Бэкапы — `<APP_DATA_DIR>/backups/*.db.bak`.
 
-## Сборка .exe (как в оригинале)
-PyInstaller onedir. Ориентировочно:
+## Сборка .exe (под Windows 8.0)
+**Кросс-сборки нет.** PyInstaller замораживает ОС, на которой запущен — на Linux
+получится ELF, не `.exe`. Собирать ТОЛЬКО на Windows.
+
+Точка входа — `app.py` в корне (тонкий launcher для `src.main`, нужен из-за
+абсолютных импортов `from src...`). Сборка описана в `OzonSorter.spec` (onedir,
+как оригинал; assets кладутся в `_internal/assets`, куда смотрит main_window.py).
+
+На Windows-машине (лучше прямо на целевой Win8.0 — гарантия совместимости):
+```bat
+:: Python 3.8 x64 (под Win8.0; разрядность должна совпадать с целевой машиной)
+py -3.8 -m venv venv
+venv\Scripts\activate
+pip install -r requirements.txt pyinstaller
+pyinstaller OzonSorter.spec
+:: результат: dist\OzonSorter\OzonSorter.exe  (+ папка _internal)
 ```
-pyinstaller --noconsole --name OzonSorter \
-  --icon assets/icon.ico \
-  --add-data "assets:assets" \
-  src/main.py
-```
-Точные опили оригинальной сборки неизвестны (`.spec` в бандл не попал) — при первой
-сборке сверь результат с оригинальной раскладкой `_internal/`.
+PyInstaller официально поддерживает Windows 8+ и Python 3.8 — отдельная старая
+версия не нужна. Если целевая Win8.0 32-битная — ставить Python 3.8 **x86**.
 
 ## Грабли
 - Несогласованный стиль импортов (см. выше) — при рефакторинге привести к одному.
