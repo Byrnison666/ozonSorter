@@ -5,8 +5,13 @@
 понадобилась). Бинарный рантайм (`.dll`/`.pyd`) не переносился — пересоберётся при упаковке.
 
 ## Стек
-- Python **3.14** (рантайм оригинальной сборки)
-- PySide6 (Qt6 GUI), SQLAlchemy 2.x (ORM поверх SQLite), openpyxl (Excel I/O)
+Целевая платформа — **Windows 8.0**, поэтому стек понижен с оригинального
+(PySide6/Python 3.14 — не запускается на Win8):
+- Python **3.8** (последний с поддержкой Windows 8.0; 3.9+ требуют 8.1)
+- PySide2 (Qt5 GUI — Qt6 не работает на Win8), SQLAlchemy 2.x (ORM/SQLite), openpyxl (Excel I/O)
+
+Порт PySide6→PySide2 был минимальным: импорты + `.exec()`→`.exec_()`. Enum'ы и
+прочий API совпали. См. ветку `win8-port`.
 
 ## Структура
 ```

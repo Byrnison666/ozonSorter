@@ -1,5 +1,5 @@
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import (
+from PySide2.QtCore import Qt
+from PySide2.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QLabel, QTableWidget, QTableWidgetItem, QHeaderView,
     QDialog, QFormLayout, QLineEdit, QComboBox, QDialogButtonBox,
@@ -106,7 +106,7 @@ class ClientsScreen(QWidget):
 
     def on_add_client(self):
         dialog = ClientDialog(self)
-        if dialog.exec() != QDialog.Accepted:
+        if dialog.exec_() != QDialog.Accepted:
             return
         data = dialog.get_data()
 

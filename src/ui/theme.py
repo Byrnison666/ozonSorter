@@ -501,8 +501,8 @@ QFrame#vLine {{
 
 def make_stat_tile(parent_layout, label_text: str, initial_value: str = "0"):
     """Возвращает (frame, value_label) — карточка с числом и подписью."""
-    from PySide6.QtWidgets import QFrame, QVBoxLayout, QLabel
-    from PySide6.QtCore import Qt
+    from PySide2.QtWidgets import QFrame, QVBoxLayout, QLabel
+    from PySide2.QtCore import Qt
 
     frame = QFrame()
     frame.setObjectName("statTile")
@@ -524,7 +524,7 @@ def make_stat_tile(parent_layout, label_text: str, initial_value: str = "0"):
 
 def make_badge(text: str, kind: str = "neutral"):
     """kind: neutral|info|success|warning|danger"""
-    from PySide6.QtWidgets import QLabel
+    from PySide2.QtWidgets import QLabel
     label = QLabel(text)
     object_name = {
         "info": "badgeInfo",
@@ -539,7 +539,7 @@ def make_badge(text: str, kind: str = "neutral"):
 
 def hr():
     """Горизонтальная разделительная линия."""
-    from PySide6.QtWidgets import QFrame
+    from PySide2.QtWidgets import QFrame
     line = QFrame()
     line.setObjectName("hLine")
     return line

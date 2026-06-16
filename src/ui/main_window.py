@@ -1,7 +1,7 @@
 import os
 
-from PySide6.QtGui import QIcon
-from PySide6.QtWidgets import (
+from PySide2.QtGui import QIcon
+from PySide2.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QStackedWidget, QLabel, QFrame, QSizePolicy
 )
