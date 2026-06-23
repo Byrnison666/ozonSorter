@@ -253,6 +253,12 @@ QPushButton#danger:hover {{
     border-color: #FCA5A5;
 }}
 
+QPushButton#danger:pressed {{
+    background-color: {Colors.DANGER};
+    color: white;
+    border-color: {Colors.DANGER};
+}}
+
 /* ---------- Inputs ---------- */
 
 QLineEdit, QComboBox {{
@@ -313,6 +319,10 @@ QTableWidget::item, QTableView::item {{
     padding: 10px 8px;
     border: none;
     border-bottom: 1px solid {Colors.SURFACE_ALT};
+}}
+
+QTableWidget::item:hover, QTableView::item:hover {{
+    background-color: {Colors.SURFACE_ALT};
 }}
 
 QTableWidget::item:selected, QTableView::item:selected {{

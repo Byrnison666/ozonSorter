@@ -8,6 +8,7 @@ from PySide2.QtWidgets import (
 
 from .dashboard_screen import DashboardScreen
 from .clients_screen import ClientsScreen
+from .control_screen import ControlScreen
 from .on_point_screen import OnPointScreen
 from .issue_screen import IssueScreen
 
@@ -18,6 +19,7 @@ NAV_STRUCTURE = [
     ]),
     ("РАБОТА", [
         ("Клиенты", "clients"),
+        ("Контроль посылок", "control"),
         ("Остатки на точках", "on_point"),
         ("Выдача", "issue"),
     ]),
@@ -65,6 +67,7 @@ class MainWindow(QMainWindow):
         self._screens = {
             "dashboard": DashboardScreen(self.db_manager, self),
             "clients": ClientsScreen(self.db_manager, self),
+            "control": ControlScreen(self.db_manager, self),
             "on_point": OnPointScreen(self.db_manager, self),
             "issue": IssueScreen(self.db_manager, self),
             "import_log": self._placeholder_screen(
@@ -121,7 +124,7 @@ class MainWindow(QMainWindow):
 
         layout.addStretch()
 
-        footer = QLabel("v1.4  •  локальная БД")
+        footer = QLabel("v1.5  •  локальная БД")
         footer.setObjectName("sidebarFooter")
         layout.addWidget(footer)
 
