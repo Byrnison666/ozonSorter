@@ -5,10 +5,11 @@
 понадобилась). Бинарный рантайм (`.dll`/`.pyd`) не переносился — пересоберётся при упаковке.
 
 ## Стек
-Целевая платформа — **Windows 8.0**, поэтому стек понижен с оригинального
-(PySide6/Python 3.14 — не запускается на Win8):
-- Python **3.8** (последний с поддержкой Windows 8.0; 3.9+ требуют 8.1)
-- PySide2 (Qt5 GUI — Qt6 не работает на Win8), SQLAlchemy 2.x (ORM/SQLite), openpyxl (Excel I/O)
+Целевая платформа — **Windows 8.1**, поэтому стек понижен с оригинального
+(PySide6/Python 3.14 — не запускается на Win8.x):
+- Python **3.10** (последний с колёсами PySide2 5.15.2.1; на 8.1 формально
+  работает до 3.12, но PySide2 кончается на 3.10)
+- PySide2 (Qt5 GUI — Qt6 требует Win10), SQLAlchemy 2.x (ORM/SQLite), openpyxl (Excel I/O)
 
 Порт PySide6→PySide2 был минимальным: импорты + `.exec()`→`.exec_()`. Enum'ы и
 прочий API совпали. См. ветку `win8-port`.
@@ -42,10 +43,10 @@ pip install -r requirements.txt
 python -m src.main
 ```
 
-### Linux dev-окружение (зеркало Win8.0)
+### Linux dev-окружение (зеркало Win8.1)
 Системный Python 3.12 не годится (нет колёс PySide2). Используется portable
-CPython 3.8.20 от python-build-standalone (с вшитыми sqlite/ssl, без sudo):
-- интерпретатор: `~/.local/python38/bin/python3.8`
+CPython 3.10 от python-build-standalone (с вшитыми sqlite/ssl, без sudo):
+- интерпретатор: `~/.local/python310/bin/python3.10`
 - venv проекта: `.venv` (создан этим интерпретатором)
 
 PySide2 на Ubuntu 24.04 не стартует из-за отсутствия `libxcb-xinerama.so.0`
@@ -61,7 +62,7 @@ Smoke-тест без дисплея: `QT_QPA_PLATFORM=offscreen .venv/bin/pytho
 `database.py` кладёт БД в `%APPDATA%/OzonSorter/ozon_sorter.db`. На Linux `APPDATA`
 не задан → fallback в `~/OzonSorter/`. Бэкапы — `<APP_DATA_DIR>/backups/*.db.bak`.
 
-## Сборка .exe (под Windows 8.0)
+## Сборка .exe (под Windows 8.1)
 **Кросс-сборки нет.** PyInstaller замораживает ОС, на которой запущен — на Linux
 получится ELF, не `.exe`. Собирать ТОЛЬКО на Windows.
 
@@ -69,17 +70,17 @@ Smoke-тест без дисплея: `QT_QPA_PLATFORM=offscreen .venv/bin/pytho
 абсолютных импортов `from src...`). Сборка описана в `OzonSorter.spec` (onedir,
 как оригинал; assets кладутся в `_internal/assets`, куда смотрит main_window.py).
 
-На Windows-машине (лучше прямо на целевой Win8.0 — гарантия совместимости):
+На Windows-машине (лучше прямо на целевой Win8.1 — гарантия совместимости):
 ```bat
-:: Python 3.8 x64 (под Win8.0; разрядность должна совпадать с целевой машиной)
-py -3.8 -m venv venv
+:: Python 3.10 x64 (под Win8.1; разрядность должна совпадать с целевой машиной)
+py -3.10 -m venv venv
 venv\Scripts\activate
 pip install -r requirements.txt pyinstaller
 pyinstaller OzonSorter.spec
 :: результат: dist\OzonSorter\OzonSorter.exe  (+ папка _internal)
 ```
-PyInstaller официально поддерживает Windows 8+ и Python 3.8 — отдельная старая
-версия не нужна. Если целевая Win8.0 32-битная — ставить Python 3.8 **x86**.
+PyInstaller официально поддерживает Windows 8.1+ и Python 3.10 — отдельная старая
+версия не нужна. Если целевая Win8.1 32-битная — ставить Python 3.10 **x86**.
 
 ## Грабли
 - Несогласованный стиль импортов (см. выше) — при рефакторинге привести к одному.
