@@ -39,5 +39,37 @@ class DatabaseManager:
                     "WHERE last_seen_import_session_id IS NULL"
                 ))
 
+            # Удаление колонки delivery_point_policy из clients. DROP COLUMN не
+            # проходит из-за CHECK-констрейнта на неё, поэтому перестраиваем таблицу.
+            # FK-проверка SQLite по умолчанию выключена → DROP/RENAME безопасны,
+            # id сохраняются, ссылки shipments.client_id остаются валидными.
+            ccols = [r[1] for r in conn.execute(text("PRAGMA table_info(clients)"))]
+            if "delivery_point_policy" in ccols:
+                conn.execute(text(
+                    "CREATE TABLE clients_new ("
+                    " id INTEGER NOT NULL PRIMARY KEY,"
+                    " ozon_client_id VARCHAR NOT NULL UNIQUE,"
+                    " full_name VARCHAR,"
+                    " phone VARCHAR,"
+                    " fixed_delivery_point VARCHAR,"
+                    " notes TEXT,"
+                    " is_active BOOLEAN,"
+                    " created_at DATETIME,"
+                    " updated_at DATETIME"
+                    ")"
+                ))
+                conn.execute(text(
+                    "INSERT INTO clients_new"
+                    " (id, ozon_client_id, full_name, phone, fixed_delivery_point,"
+                    "  notes, is_active, created_at, updated_at)"
+                    " SELECT id, ozon_client_id, full_name, phone, fixed_delivery_point,"
+                    "  notes, is_active, created_at, updated_at FROM clients"
+                ))
+                conn.execute(text("DROP TABLE clients"))
+                conn.execute(text("ALTER TABLE clients_new RENAME TO clients"))
+                conn.execute(text(
+                    "CREATE INDEX idx_clients_is_active ON clients (is_active)"
+                ))
+
     def get_session(self) -> Session:
         return self.SessionLocal()

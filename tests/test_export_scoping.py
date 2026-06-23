@@ -14,7 +14,7 @@ import openpyxl
 from src.database import DatabaseManager
 from src.models import (
     Client, Shipment, ImportSession,
-    AssignmentStatus, DeliveryPoint, DeliveryPointPolicy,
+    AssignmentStatus, DeliveryPoint,
 )
 from src.export_service import ExportService
 
@@ -122,17 +122,6 @@ class ExportScopingTest(unittest.TestCase):
     def test_unknown_import_session_raises(self):
         with self.assertRaises(ValueError):
             self.export.generate_export(DeliveryPoint.KOMSOMOLSKAYA_4, "x.xlsx", 99999)
-
-    def test_count_unassigned_in_report(self):
-        # MANUAL без точки в текущем отчёте (день 2) — считается как нераспределённый.
-        _shipment(
-            self.session, "333-C-1", None,
-            AssignmentStatus.TO_ASSIGN, datetime(2026, 6, 2, 10, 0, 7), self.day2.id,
-        )
-        self.session.commit()
-        self.assertEqual(self.export.count_unassigned_in_report(self.day2.id), 1)
-        # По дню 1 этого MANUAL ещё не было — 0.
-        self.assertEqual(self.export.count_unassigned_in_report(self.day1.id), 0)
 
 
 if __name__ == "__main__":

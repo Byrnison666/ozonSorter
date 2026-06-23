@@ -4,8 +4,7 @@ from typing import List, Dict, Any, Optional
 from sqlalchemy.orm import Session
 from sqlalchemy import select
 from .models import (
-    Client, Shipment, ImportSession, AssignmentStatus, 
-    DeliveryPointPolicy, DeliveryPoint
+    Client, Shipment, ImportSession, AssignmentStatus, DeliveryPoint
 )
 from .parser import ExcelParser
 
@@ -96,26 +95,15 @@ class ImportService:
                     # Keep existing assignment status and point
                     pass
             else:
-                # Create new shipment
-                status = AssignmentStatus.TO_SHIP
-                assigned_point = None
-                
-                if client.delivery_point_policy == DeliveryPointPolicy.FIXED:
-                    status = AssignmentStatus.TO_SHIP
-                    assigned_point = client.fixed_delivery_point
-                else:
-                    status = AssignmentStatus.TO_ASSIGN
-                    assigned_point = None
-                
+                # Новая посылка: всегда к отгрузке на точку клиента.
                 self._create_shipment(
-                    row_data, 
-                    import_session.id, 
-                    status, 
-                    client_id=client.id, 
-                    assigned_point=assigned_point
+                    row_data,
+                    import_session.id,
+                    AssignmentStatus.TO_SHIP,
+                    client_id=client.id,
+                    assigned_point=client.fixed_delivery_point,
                 )
-                if status == AssignmentStatus.TO_SHIP:
-                    import_session.new_to_ship_rows += 1
+                import_session.new_to_ship_rows += 1
                 
         import_session.finished_at = datetime.now()
         import_session.log_json = json.dumps(logs)

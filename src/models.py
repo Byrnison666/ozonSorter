@@ -3,7 +3,7 @@ from enum import Enum as PyEnum
 from typing import List, Optional
 from sqlalchemy import (
     Column, Integer, String, Boolean, DateTime, ForeignKey, 
-    Enum, Text, UniqueConstraint, Index, CheckConstraint
+    Enum, Text, UniqueConstraint, Index
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -13,10 +13,6 @@ class Base(DeclarativeBase):
 class DeliveryPoint(str, PyEnum):
     KOMSOMOLSKAYA_4 = "KOMSOMOLSKAYA_4"
     KOLTSEVAYA_16 = "KOLTSEVAYA_16"
-
-class DeliveryPointPolicy(str, PyEnum):
-    FIXED = "FIXED"
-    MANUAL = "MANUAL"
 
 class AssignmentStatus(str, PyEnum):
     TO_ASSIGN = "TO_ASSIGN"
@@ -33,9 +29,8 @@ class Client(Base):
     ozon_client_id: Mapped[str] = mapped_column(String, unique=True, nullable=False)
     full_name: Mapped[Optional[str]] = mapped_column(String)
     phone: Mapped[Optional[str]] = mapped_column(String)
-    delivery_point_policy: Mapped[DeliveryPointPolicy] = mapped_column(
-        Enum(DeliveryPointPolicy), nullable=False
-    )
+    # Точка выдачи клиента. На уровне БД nullable (безопасная миграция старых строк),
+    # на уровне UI/импорта — обязательна: у каждого клиента известна точка.
     fixed_delivery_point: Mapped[Optional[DeliveryPoint]] = mapped_column(
         Enum(DeliveryPoint)
     )
@@ -47,11 +42,6 @@ class Client(Base):
     shipments: Mapped[List["Shipment"]] = relationship(back_populates="client")
 
     __table_args__ = (
-        CheckConstraint(
-            "(delivery_point_policy = 'FIXED' AND fixed_delivery_point IS NOT NULL) OR "
-            "(delivery_point_policy = 'MANUAL' AND fixed_delivery_point IS NULL)",
-            name="check_delivery_point_policy"
-        ),
         Index("idx_clients_is_active", "is_active"),
     )
 

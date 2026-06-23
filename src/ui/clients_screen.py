@@ -7,9 +7,8 @@ from PySide2.QtWidgets import (
 )
 from sqlalchemy import select
 
-from src.models import Client, DeliveryPointPolicy, DeliveryPoint
+from src.models import Client, DeliveryPoint
 from src.client_import_service import ClientImportService
-from .theme import make_badge
 
 
 class ClientsScreen(QWidget):
@@ -43,6 +42,14 @@ class ClientsScreen(QWidget):
         self.import_btn.clicked.connect(self.on_import_file)
         header.addWidget(self.import_btn, 0, Qt.AlignTop)
 
+        self.edit_btn = QPushButton("Изменить")
+        self.edit_btn.clicked.connect(self.on_edit_client)
+        header.addWidget(self.edit_btn, 0, Qt.AlignTop)
+
+        self.delete_btn = QPushButton("Удалить")
+        self.delete_btn.clicked.connect(self.on_delete_client)
+        header.addWidget(self.delete_btn, 0, Qt.AlignTop)
+
         self.add_btn = QPushButton("+ Добавить клиента")
         self.add_btn.setObjectName("primary")
         self.add_btn.clicked.connect(self.on_add_client)
@@ -57,18 +64,18 @@ class ClientsScreen(QWidget):
         card_lay.setSpacing(0)
 
         self.table = QTableWidget()
-        self.table.setColumnCount(5)
-        self.table.setHorizontalHeaderLabels(
-            ["Ozon ID", "ФИО", "Телефон", "Политика", "Точка по умолчанию"]
-        )
+        self.table.setColumnCount(4)
+        self.table.setHorizontalHeaderLabels(["Ozon ID", "ФИО", "Телефон", "Точка"])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.table.verticalHeader().setVisible(False)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setShowGrid(False)
         self.table.setAlternatingRowColors(False)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.table.setFrameShape(QFrame.NoFrame)
         self.table.verticalHeader().setDefaultSectionSize(40)
+        self.table.doubleClicked.connect(lambda _idx: self.on_edit_client())
         card_lay.addWidget(self.table)
 
         layout.addWidget(card, 1)
@@ -91,17 +98,14 @@ class ClientsScreen(QWidget):
             for client in clients:
                 row = self.table.rowCount()
                 self.table.insertRow(row)
-                self.table.setItem(row, 0, QTableWidgetItem(client.ozon_client_id))
+                id_item = QTableWidgetItem(client.ozon_client_id)
+                id_item.setData(Qt.UserRole, client.id)
+                self.table.setItem(row, 0, id_item)
                 self.table.setItem(row, 1, QTableWidgetItem(client.full_name or ""))
                 self.table.setItem(row, 2, QTableWidgetItem(client.phone or ""))
-
-                policy = client.delivery_point_policy.value
-                kind = "info" if policy == "FIXED" else "warning"
-                badge_text = "FIXED" if policy == "FIXED" else "MANUAL"
-                self.table.setCellWidget(row, 3, make_badge(badge_text, kind))
-
-                point_text = self._point_text(client.fixed_delivery_point)
-                self.table.setItem(row, 4, QTableWidgetItem(point_text))
+                self.table.setItem(
+                    row, 3, QTableWidgetItem(self._point_text(client.fixed_delivery_point))
+                )
         finally:
             session.close()
 
@@ -113,25 +117,25 @@ class ClientsScreen(QWidget):
             return "Кольцевая 16"
         return "—"
 
+    def _selected_client_id(self):
+        row = self.table.currentRow()
+        if row < 0:
+            return None
+        item = self.table.item(row, 0)
+        return item.data(Qt.UserRole) if item else None
+
     def on_add_client(self):
         dialog = ClientDialog(self)
         if dialog.exec_() != QDialog.Accepted:
             return
         data = dialog.get_data()
-
-        if not data['ozon_client_id'].isdigit():
-            QMessageBox.warning(
-                self, "Ошибка",
-                "Ozon ID должен содержать только цифры (без дефисов и букв)."
-            )
+        if not self._validate(data):
             return
 
         session = self.db_manager.get_session()
         try:
             existing = session.execute(
-                select(Client).where(
-                    Client.ozon_client_id == data['ozon_client_id']
-                )
+                select(Client).where(Client.ozon_client_id == data['ozon_client_id'])
             ).scalar_one_or_none()
             if existing:
                 QMessageBox.warning(
@@ -140,24 +144,110 @@ class ClientsScreen(QWidget):
                 )
                 return
 
-            client = Client(
+            session.add(Client(
                 ozon_client_id=data['ozon_client_id'],
                 full_name=data['full_name'] or None,
                 phone=data['phone'] or None,
-                delivery_point_policy=DeliveryPointPolicy(data['policy']),
-                fixed_delivery_point=(
-                    DeliveryPoint(data['point']) if data['point'] else None
-                ),
-            )
-            session.add(client)
+                fixed_delivery_point=DeliveryPoint(data['point']),
+            ))
             session.commit()
             self.refresh_table()
         except Exception as e:
             session.rollback()
-            QMessageBox.critical(self, "Ошибка",
-                                 f"Не удалось добавить клиента:\n{e}")
+            QMessageBox.critical(self, "Ошибка", f"Не удалось добавить клиента:\n{e}")
         finally:
             session.close()
+
+    def on_edit_client(self):
+        client_id = self._selected_client_id()
+        if client_id is None:
+            QMessageBox.information(self, "Нет выбора", "Выберите клиента в списке.")
+            return
+
+        session = self.db_manager.get_session()
+        try:
+            client = session.get(Client, client_id)
+            if client is None:
+                return
+            initial = {
+                'ozon_client_id': client.ozon_client_id,
+                'full_name': client.full_name or "",
+                'phone': client.phone or "",
+                'point': client.fixed_delivery_point.value if client.fixed_delivery_point else None,
+            }
+            dialog = ClientDialog(self, initial=initial)
+            if dialog.exec_() != QDialog.Accepted:
+                return
+            data = dialog.get_data()
+            if not self._validate(data):
+                return
+
+            # Запрет на смену id в чужой существующий
+            if data['ozon_client_id'] != client.ozon_client_id:
+                clash = session.execute(
+                    select(Client).where(
+                        Client.ozon_client_id == data['ozon_client_id'],
+                        Client.id != client.id,
+                    )
+                ).scalar_one_or_none()
+                if clash:
+                    QMessageBox.warning(
+                        self, "Дубликат",
+                        f"Клиент с ID {data['ozon_client_id']} уже существует."
+                    )
+                    return
+
+            client.ozon_client_id = data['ozon_client_id']
+            client.full_name = data['full_name'] or None
+            client.phone = data['phone'] or None
+            client.fixed_delivery_point = DeliveryPoint(data['point'])
+            session.commit()
+            self.refresh_table()
+        except Exception as e:
+            session.rollback()
+            QMessageBox.critical(self, "Ошибка", f"Не удалось изменить клиента:\n{e}")
+        finally:
+            session.close()
+
+    def on_delete_client(self):
+        client_id = self._selected_client_id()
+        if client_id is None:
+            QMessageBox.information(self, "Нет выбора", "Выберите клиента в списке.")
+            return
+
+        session = self.db_manager.get_session()
+        try:
+            client = session.get(Client, client_id)
+            if client is None:
+                return
+            name = client.full_name or client.ozon_client_id
+            if QMessageBox.question(
+                self, "Удалить клиента",
+                f"Удалить клиента «{name}» из списка?\n"
+                f"История его посылок сохранится, новые перестанут к нему относиться.",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+            ) != QMessageBox.Yes:
+                return
+            client.is_active = False
+            session.commit()
+            self.refresh_table()
+        except Exception as e:
+            session.rollback()
+            QMessageBox.critical(self, "Ошибка", f"Не удалось удалить клиента:\n{e}")
+        finally:
+            session.close()
+
+    def _validate(self, data) -> bool:
+        if not data['ozon_client_id'].isdigit():
+            QMessageBox.warning(
+                self, "Ошибка",
+                "Ozon ID должен содержать только цифры (без дефисов и букв)."
+            )
+            return False
+        if not data['point']:
+            QMessageBox.warning(self, "Ошибка", "Выберите точку выдачи.")
+            return False
+        return True
 
     def on_download_template(self):
         file_path, _ = QFileDialog.getSaveFileName(
@@ -172,8 +262,7 @@ class ClientsScreen(QWidget):
                 f"Заполните файл и загрузите через «Импорт из файла»:\n{file_path}"
             )
         except Exception as e:
-            QMessageBox.critical(self, "Ошибка",
-                                 f"Не удалось сохранить шаблон:\n{e}")
+            QMessageBox.critical(self, "Ошибка", f"Не удалось сохранить шаблон:\n{e}")
 
     def on_import_file(self):
         file_path, _ = QFileDialog.getOpenFileName(
@@ -212,16 +301,18 @@ class ClientsScreen(QWidget):
 
 
 class ClientDialog(QDialog):
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, initial=None):
         super().__init__(parent)
-        self.setWindowTitle("Новый клиент")
+        is_edit = initial is not None
+        title_text = "Изменить клиента" if is_edit else "Новый клиент"
+        self.setWindowTitle(title_text)
         self.setMinimumWidth(420)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(20, 18, 20, 18)
         outer.setSpacing(14)
 
-        title = QLabel("Новый клиент")
+        title = QLabel(title_text)
         title.setObjectName("h2")
         outer.addWidget(title)
 
@@ -246,22 +337,14 @@ class ClientDialog(QDialog):
         self.phone_edit.setPlaceholderText("необязательно")
         form.addRow("Телефон:", self.phone_edit)
 
-        self.policy_combo = QComboBox()
-        self.policy_combo.addItem("FIXED — все посылки на одну точку", "FIXED")
-        self.policy_combo.addItem("MANUAL — распределяем вручную", "MANUAL")
-        self.policy_combo.currentIndexChanged.connect(self.on_policy_changed)
-        form.addRow("Политика:", self.policy_combo)
-
         self.point_combo = QComboBox()
         self.point_combo.addItem("Комсомольская 4", "KOMSOMOLSKAYA_4")
         self.point_combo.addItem("Кольцевая 16", "KOLTSEVAYA_16")
-        form.addRow("Точка по умолчанию:", self.point_combo)
+        form.addRow("Точка выдачи:", self.point_combo)
 
         outer.addLayout(form)
 
-        self.buttons = QDialogButtonBox(
-            QDialogButtonBox.Ok | QDialogButtonBox.Cancel
-        )
+        self.buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         self.buttons.button(QDialogButtonBox.Ok).setText("Сохранить")
         self.buttons.button(QDialogButtonBox.Ok).setObjectName("primary")
         self.buttons.button(QDialogButtonBox.Cancel).setText("Отмена")
@@ -269,19 +352,18 @@ class ClientDialog(QDialog):
         self.buttons.rejected.connect(self.reject)
         outer.addWidget(self.buttons)
 
-        self.on_policy_changed()
-
-    def on_policy_changed(self, *_):
-        is_fixed = self.policy_combo.currentData() == "FIXED"
-        self.point_combo.setEnabled(is_fixed)
+        if is_edit:
+            self.id_edit.setText(initial.get('ozon_client_id', ""))
+            self.name_edit.setText(initial.get('full_name', ""))
+            self.phone_edit.setText(initial.get('phone', ""))
+            idx = self.point_combo.findData(initial.get('point'))
+            if idx >= 0:
+                self.point_combo.setCurrentIndex(idx)
 
     def get_data(self):
         return {
             'ozon_client_id': self.id_edit.text().strip(),
             'full_name': self.name_edit.text().strip(),
             'phone': self.phone_edit.text().strip(),
-            'policy': self.policy_combo.currentData(),
-            'point': (self.point_combo.currentData()
-                      if self.policy_combo.currentData() == "FIXED"
-                      else None),
+            'point': self.point_combo.currentData(),
         }

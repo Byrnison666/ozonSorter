@@ -1,7 +1,7 @@
 """Массовый импорт клиентов из xlsx.
 
-Формат: одна строка-заголовок (Ozon ID, ФИО, Телефон, Политика, Точка) и строки
-данных. Невалидная строка не валит весь файл — собираем ошибки с номерами строк.
+Формат: одна строка-заголовок (Ozon ID, ФИО, Телефон, Точка) и строки данных.
+Невалидная строка не валит весь файл — собираем ошибки с номерами строк.
 Существующий клиент (по Ozon ID) обновляется значениями из файла.
 """
 from dataclasses import dataclass, field
@@ -11,7 +11,7 @@ import openpyxl
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .models import Client, DeliveryPoint, DeliveryPointPolicy
+from .models import Client, DeliveryPoint
 
 
 # Логическое имя колонки -> допустимые заголовки (нормализованные: lower, без пробелов).
@@ -19,17 +19,7 @@ _HEADER_ALIASES = {
     "ozon_client_id": {"ozonid", "id", "озонid", "озонид"},
     "full_name": {"фио", "имя", "name"},
     "phone": {"телефон", "phone", "тел"},
-    "policy": {"политика", "policy"},
     "point": {"точка", "точкаповыдаче", "точкапоумолчанию", "point"},
-}
-
-_POLICY_ALIASES = {
-    "FIXED": DeliveryPointPolicy.FIXED,
-    "ФИКС": DeliveryPointPolicy.FIXED,
-    "ФИКСИРОВАННАЯ": DeliveryPointPolicy.FIXED,
-    "MANUAL": DeliveryPointPolicy.MANUAL,
-    "РУЧНАЯ": DeliveryPointPolicy.MANUAL,
-    "РУЧНОЙ": DeliveryPointPolicy.MANUAL,
 }
 
 _POINT_ALIASES = {
@@ -39,9 +29,9 @@ _POINT_ALIASES = {
     "кольцевая": DeliveryPoint.KOLTSEVAYA_16,
 }
 
-_REQUIRED_COLUMNS = ("ozon_client_id", "policy")
+_REQUIRED_COLUMNS = ("ozon_client_id", "point")
 
-TEMPLATE_HEADERS = ["Ozon ID", "ФИО", "Телефон", "Политика", "Точка"]
+TEMPLATE_HEADERS = ["Ozon ID", "ФИО", "Телефон", "Точка"]
 
 
 @dataclass
@@ -77,9 +67,9 @@ class ClientImportService:
         ws = wb.active
         ws.title = "Клиенты"
         ws.append(TEMPLATE_HEADERS)
-        ws.append(["0224933356", "Иванов И.И.", "", "FIXED", "Комсомольская 4"])
-        ws.append(["0301234567", "Петров П.П.", "", "MANUAL", ""])
-        widths = [16, 22, 16, 12, 20]
+        ws.append(["0224933356", "Иванов И.И.", "", "Комсомольская 4"])
+        ws.append(["0301234567", "Петров П.П.", "", "Кольцевая 16"])
+        widths = [16, 22, 16, 20]
         for idx, w in enumerate(widths, 1):
             ws.column_dimensions[openpyxl.utils.get_column_letter(idx)].width = w
         wb.save(path)
@@ -91,7 +81,7 @@ class ClientImportService:
         header_row_idx, col_map = self._find_header(ws)
         if header_row_idx is None:
             raise ValueError(
-                "Не найден заголовок. Обязательные колонки: «Ozon ID» и «Политика». "
+                "Не найден заголовок. Обязательные колонки: «Ozon ID» и «Точка». "
                 "Скачайте шаблон и заполните его."
             )
 
@@ -117,7 +107,6 @@ class ClientImportService:
             if existing:
                 existing.full_name = parsed["full_name"]
                 existing.phone = parsed["phone"]
-                existing.delivery_point_policy = parsed["policy"]
                 existing.fixed_delivery_point = parsed["point"]
                 existing.is_active = True
                 result.updated += 1
@@ -126,7 +115,6 @@ class ClientImportService:
                     ozon_client_id=parsed["ozon_client_id"],
                     full_name=parsed["full_name"],
                     phone=parsed["phone"],
-                    delivery_point_policy=parsed["policy"],
                     fixed_delivery_point=parsed["point"],
                 ))
                 result.added += 1
@@ -139,31 +127,20 @@ class ClientImportService:
         if not ozon_id.isdigit():
             return None, f"Ozon ID «{ozon_id}» — только цифры, без дефисов и букв"
 
-        policy_key = _cell_to_str(raw.get("policy")).upper()
-        policy = _POLICY_ALIASES.get(policy_key)
-        if policy is None:
-            return None, f"Политика «{raw.get('policy')}» — допустимо FIXED или MANUAL"
-
-        point = None
         point_raw = _norm(raw.get("point"))
-        if point_raw:
-            point = _POINT_ALIASES.get(point_raw)
-            if point is None:
-                return None, (
-                    f"Точка «{raw.get('point')}» — допустимо «Комсомольская 4» "
-                    f"или «Кольцевая 16»"
-                )
-
-        if policy == DeliveryPointPolicy.FIXED and point is None:
-            return None, "Для FIXED нужна точка по умолчанию"
-        if policy == DeliveryPointPolicy.MANUAL and point is not None:
-            return None, "Для MANUAL точка не указывается (распределяется вручную)"
+        if not point_raw:
+            return None, "Не указана точка («Комсомольская 4» или «Кольцевая 16»)"
+        point = _POINT_ALIASES.get(point_raw)
+        if point is None:
+            return None, (
+                f"Точка «{raw.get('point')}» — допустимо «Комсомольская 4» "
+                f"или «Кольцевая 16»"
+            )
 
         return {
             "ozon_client_id": ozon_id,
             "full_name": _cell_to_str(raw.get("full_name")) or None,
             "phone": _cell_to_str(raw.get("phone")) or None,
-            "policy": policy,
             "point": point,
         }, None
 

@@ -10,9 +10,7 @@ import openpyxl
 from sqlalchemy import select
 
 from src.database import DatabaseManager
-from src.models import (
-    Client, Shipment, DeliveryPoint, DeliveryPointPolicy, AssignmentStatus,
-)
+from src.models import Client, Shipment, DeliveryPoint, AssignmentStatus
 from src.services import ImportService
 from src.export_service import ExportService
 
@@ -39,7 +37,6 @@ class ImportLastSeenTest(unittest.TestCase):
         # FIXED-клиент 111 → его посылки сразу TO_SHIP на Комсомольскую.
         self.session.add(Client(
             ozon_client_id="111", full_name="Тест",
-            delivery_point_policy=DeliveryPointPolicy.FIXED,
             fixed_delivery_point=DeliveryPoint.KOMSOMOLSKAYA_4,
         ))
         self.session.commit()

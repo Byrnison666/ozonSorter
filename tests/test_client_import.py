@@ -1,4 +1,7 @@
-"""Массовый импорт клиентов из xlsx: happy path, обновление дублей, сбор ошибок."""
+"""Массовый импорт клиентов из xlsx: happy path, обновление дублей, сбор ошибок.
+
+Формат после удаления «Политики»: Ozon ID, ФИО, Телефон, Точка. Точка обязательна.
+"""
 import os
 import tempfile
 import unittest
@@ -7,7 +10,7 @@ import openpyxl
 from sqlalchemy import select
 
 from src.database import DatabaseManager
-from src.models import Client, DeliveryPoint, DeliveryPointPolicy
+from src.models import Client, DeliveryPoint
 from src.client_import_service import ClientImportService, TEMPLATE_HEADERS
 
 
@@ -49,29 +52,23 @@ class ClientImportTest(unittest.TestCase):
             select(Client).where(Client.ozon_client_id == ozon_id)
         ).scalar_one_or_none()
 
-    def test_happy_path_fixed_and_manual(self):
+    def test_happy_path(self):
         res = self._import([
-            ["111", "Иванов", "+7", "FIXED", "Комсомольская 4"],
-            ["222", "Петров", "", "MANUAL", ""],
+            ["111", "Иванов", "+7", "Комсомольская 4"],
+            ["222", "Петров", "", "Кольцевая 16"],
         ])
         self.assertEqual((res.added, res.updated, len(res.errors)), (2, 0, 0))
-        c1 = self._client("111")
-        self.assertEqual(c1.delivery_point_policy, DeliveryPointPolicy.FIXED)
-        self.assertEqual(c1.fixed_delivery_point, DeliveryPoint.KOMSOMOLSKAYA_4)
-        c2 = self._client("222")
-        self.assertEqual(c2.delivery_point_policy, DeliveryPointPolicy.MANUAL)
-        self.assertIsNone(c2.fixed_delivery_point)
+        self.assertEqual(self._client("111").fixed_delivery_point, DeliveryPoint.KOMSOMOLSKAYA_4)
+        self.assertEqual(self._client("222").fixed_delivery_point, DeliveryPoint.KOLTSEVAYA_16)
 
     def test_duplicate_updates_existing(self):
-        self._import([["111", "Старое имя", "", "FIXED", "Комсомольская 4"]])
-        res = self._import([["111", "Новое имя", "+7999", "MANUAL", ""]])
+        self._import([["111", "Старое имя", "", "Комсомольская 4"]])
+        res = self._import([["111", "Новое имя", "+7999", "Кольцевая 16"]])
         self.assertEqual((res.added, res.updated), (0, 1))
         c = self._client("111")
         self.assertEqual(c.full_name, "Новое имя")
         self.assertEqual(c.phone, "+7999")
-        self.assertEqual(c.delivery_point_policy, DeliveryPointPolicy.MANUAL)
-        self.assertIsNone(c.fixed_delivery_point)
-        # дубля в БД не появилось
+        self.assertEqual(c.fixed_delivery_point, DeliveryPoint.KOLTSEVAYA_16)
         n = len(self.session.execute(
             select(Client).where(Client.ozon_client_id == "111")
         ).scalars().all())
@@ -79,37 +76,31 @@ class ClientImportTest(unittest.TestCase):
 
     def test_bad_rows_collected_good_rows_imported(self):
         res = self._import([
-            ["abc", "", "", "FIXED", "Комсомольская 4"],   # id не цифры
-            ["333", "", "", "FIXED", ""],                  # FIXED без точки
-            ["444", "", "", "MANUAL", "Кольцевая 16"],     # MANUAL с точкой
-            ["555", "", "", "ХЗ", ""],                     # неизвестная политика
-            ["666", "", "", "FIXED", "Луна"],              # неизвестная точка
-            ["777", "Ок", "", "FIXED", "Кольцевая 16"],    # валидная
+            ["abc", "", "", "Комсомольская 4"],   # id не цифры
+            ["333", "", "", ""],                  # нет точки
+            ["444", "", "", "Луна"],              # неизвестная точка
+            ["555", "Ок", "", "Кольцевая 16"],    # валидная
         ])
         self.assertEqual(res.added, 1)
-        self.assertEqual(len(res.errors), 5)
-        self.assertIsNotNone(self._client("777"))
+        self.assertEqual(len(res.errors), 3)
+        self.assertIsNotNone(self._client("555"))
         self.assertIsNone(self._client("333"))
-        # номера строк — реальные (данные начинаются со 2-й, заголовок 1-я)
-        bad_rows = [r for r, _ in res.errors]
-        self.assertEqual(bad_rows, [2, 3, 4, 5, 6])
+        self.assertEqual([r for r, _ in res.errors], [2, 3, 4])
 
     def test_numeric_id_coerced(self):
-        # openpyxl вернёт int/float для числовой ячейки — не должно стать "111.0"
-        res = self._import([[111, "", "", "FIXED", "Комсомольская 4"]])
+        res = self._import([[111, "", "", "Комсомольская 4"]])
         self.assertEqual(res.added, 1)
         self.assertIsNotNone(self._client("111"))
 
     def test_missing_required_header_raises(self):
         with self.assertRaises(ValueError):
-            self._import([["111", "FIXED"]], headers=["ФИО", "Телефон"])
+            self._import([["111", "x"]], headers=["ФИО", "Телефон"])
 
     def test_template_roundtrips(self):
         path = tempfile.mktemp(suffix=".xlsx")
         self._files.append(path)
         ClientImportService.write_template(path)
         res = self.svc.import_clients(path)
-        # шаблон содержит 2 валидных примера
         self.assertEqual((res.added, len(res.errors)), (2, 0))
 
 

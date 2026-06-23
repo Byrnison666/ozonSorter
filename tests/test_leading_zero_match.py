@@ -12,7 +12,7 @@ import openpyxl
 from sqlalchemy import select
 
 from src.database import DatabaseManager
-from src.models import Client, Shipment, AssignmentStatus, DeliveryPoint, DeliveryPointPolicy
+from src.models import Client, Shipment, AssignmentStatus, DeliveryPoint
 from src.services import ImportService
 from src.parser import ExcelParser
 
@@ -47,7 +47,6 @@ class LeadingZeroMatchTest(unittest.TestCase):
     def _add_client(self, ozon_id):
         self.session.add(Client(
             ozon_client_id=ozon_id,
-            delivery_point_policy=DeliveryPointPolicy.FIXED,
             fixed_delivery_point=DeliveryPoint.KOMSOMOLSKAYA_4,
         ))
         self.session.commit()

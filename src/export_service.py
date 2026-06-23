@@ -2,7 +2,7 @@ import os
 from datetime import datetime
 from typing import List
 from sqlalchemy.orm import Session
-from sqlalchemy import select, func
+from sqlalchemy import select
 import openpyxl
 from openpyxl.styles import PatternFill, Alignment, Border, Side
 from .models import Shipment, AssignmentStatus, DeliveryPoint, ExportSession, ImportSession
@@ -80,16 +80,6 @@ class ExportService:
         self.session.add(export_session)
         self.session.commit()
         return export_session
-
-    def count_unassigned_in_report(self, import_session_id: int) -> int:
-        """MANUAL-посылки из текущего отчёта без назначенной точки (ждут Распределения).
-        Они не попадают ни в один файл по точкам — операторе нужно их распределить,
-        иначе они будут пропущены на заборе с Донецка."""
-        stmt = select(func.count()).select_from(Shipment).where(
-            Shipment.assignment_status == AssignmentStatus.TO_ASSIGN,
-            Shipment.last_seen_import_session_id == import_session_id,
-        )
-        return self.session.execute(stmt).scalar_one()
 
     def _natural_key(self, text: str) -> List:
         import re

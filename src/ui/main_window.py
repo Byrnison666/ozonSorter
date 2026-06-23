@@ -8,7 +8,6 @@ from PySide2.QtWidgets import (
 
 from .dashboard_screen import DashboardScreen
 from .clients_screen import ClientsScreen
-from .route_assignment_screen import RouteAssignmentScreen
 from .on_point_screen import OnPointScreen
 from .issue_screen import IssueScreen
 
@@ -19,7 +18,6 @@ NAV_STRUCTURE = [
     ]),
     ("РАБОТА", [
         ("Клиенты", "clients"),
-        ("Распределение", "route"),
         ("Остатки на точках", "on_point"),
         ("Выдача", "issue"),
     ]),
@@ -67,7 +65,6 @@ class MainWindow(QMainWindow):
         self._screens = {
             "dashboard": DashboardScreen(self.db_manager, self),
             "clients": ClientsScreen(self.db_manager, self),
-            "route": RouteAssignmentScreen(self.db_manager, self),
             "on_point": OnPointScreen(self.db_manager, self),
             "issue": IssueScreen(self.db_manager, self),
             "import_log": self._placeholder_screen(
