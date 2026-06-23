@@ -199,8 +199,18 @@ class DashboardScreen(QWidget):
             self.export_service.generate_export(
                 point, file_path, self.last_import_session_id
             )
-            QMessageBox.information(self, "Готово",
-                                    f"Файл сохранён:\n{file_path}")
+            unassigned = self.export_service.count_unassigned_in_report(
+                self.last_import_session_id
+            )
+            msg = f"Файл сохранён:\n{file_path}"
+            if unassigned:
+                msg += (
+                    f"\n\nВнимание: {unassigned} посыл(ок) MANUAL-клиентов ещё не "
+                    f"распределены и не попали ни в один файл. Распределите их во "
+                    f"вкладке «Распределение» и сформируйте файлы заново, иначе "
+                    f"они будут пропущены при заборе с Донецка."
+                )
+            QMessageBox.information(self, "Готово", msg)
         except Exception as e:
             QMessageBox.critical(self, "Ошибка экспорта",
                                  f"Не удалось сохранить файл:\n{e}")

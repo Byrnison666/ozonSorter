@@ -79,6 +79,7 @@ class ImportService:
             
             if existing_shipment:
                 existing_shipment.last_seen_at = datetime.now()
+                existing_shipment.last_seen_import_session_id = import_session.id
                 if existing_shipment.assignment_status == AssignmentStatus.ON_POINT:
                     import_session.already_on_point += 1
                     logs.append(f"Shipment {posting_number} already on point.")
@@ -130,6 +131,7 @@ class ImportService:
             assignment_status=status,
             assigned_point=assigned_point,
             import_session_id=session_id,
+            last_seen_import_session_id=session_id,
             first_seen_at=datetime.now(),
             last_seen_at=datetime.now()
         )

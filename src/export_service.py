@@ -2,20 +2,28 @@ import os
 from datetime import datetime
 from typing import List
 from sqlalchemy.orm import Session
-from sqlalchemy import select
+from sqlalchemy import select, func
 import openpyxl
 from openpyxl.styles import PatternFill, Alignment, Border, Side
-from .models import Shipment, AssignmentStatus, DeliveryPoint, ExportSession
+from .models import Shipment, AssignmentStatus, DeliveryPoint, ExportSession, ImportSession
 
 class ExportService:
     def __init__(self, db_session: Session):
         self.session = db_session
 
     def generate_export(self, delivery_point: DeliveryPoint, output_path: str, import_session_id: int) -> ExportSession:
-        # Fetch shipments to ship for this point
+        import_session = self.session.get(ImportSession, import_session_id)
+        if import_session is None:
+            raise ValueError(f"Import session {import_session_id} not found")
+
+        # Только посылки из текущего отчёта: импорт проставляет каждой встреченной
+        # строке last_seen_import_session_id = id своей сессии. «Видели в этом отчёте»
+        # = физически лежит на Казакова 68. Без этого условия TO_SHIP копится по всем
+        # прошлым импортам и в файл попадают уже забранные с Донецка посылки.
         stmt = select(Shipment).where(
             Shipment.assigned_point == delivery_point,
-            Shipment.assignment_status == AssignmentStatus.TO_SHIP
+            Shipment.assignment_status == AssignmentStatus.TO_SHIP,
+            Shipment.last_seen_import_session_id == import_session_id,
         )
         shipments = self.session.execute(stmt).scalars().all()
         
@@ -68,6 +76,16 @@ class ExportService:
         self.session.add(export_session)
         self.session.commit()
         return export_session
+
+    def count_unassigned_in_report(self, import_session_id: int) -> int:
+        """MANUAL-посылки из текущего отчёта без назначенной точки (ждут Распределения).
+        Они не попадают ни в один файл по точкам — операторе нужно их распределить,
+        иначе они будут пропущены на заборе с Донецка."""
+        stmt = select(func.count()).select_from(Shipment).where(
+            Shipment.assignment_status == AssignmentStatus.TO_ASSIGN,
+            Shipment.last_seen_import_session_id == import_session_id,
+        )
+        return self.session.execute(stmt).scalar_one()
 
     def _natural_key(self, text: str) -> List:
         import re

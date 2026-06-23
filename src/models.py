@@ -72,7 +72,9 @@ class ImportSession(Base):
     errors_rows: Mapped[int] = mapped_column(Integer, default=0)
     log_json: Mapped[Optional[str]] = mapped_column(Text)
 
-    shipments: Mapped[List["Shipment"]] = relationship(back_populates="import_session")
+    shipments: Mapped[List["Shipment"]] = relationship(
+        back_populates="import_session", foreign_keys="Shipment.import_session_id"
+    )
 
 class Shipment(Base):
     __tablename__ = "shipments"
@@ -97,6 +99,9 @@ class Shipment(Base):
         Enum(DeliveryPoint)
     )
     import_session_id: Mapped[int] = mapped_column(ForeignKey("import_sessions.id"))
+    last_seen_import_session_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("import_sessions.id")
+    )
     first_seen_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
     shipped_to_point_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
@@ -104,12 +109,15 @@ class Shipment(Base):
     notes: Mapped[Optional[str]] = mapped_column(Text)
 
     client: Mapped[Optional["Client"]] = relationship(back_populates="shipments")
-    import_session: Mapped["ImportSession"] = relationship(back_populates="shipments")
+    import_session: Mapped["ImportSession"] = relationship(
+        back_populates="shipments", foreign_keys=[import_session_id]
+    )
 
     __table_args__ = (
         Index("idx_shipments_assignment_status", "assignment_status"),
         Index("idx_shipments_assigned_point", "assigned_point"),
         Index("idx_shipments_ozon_client_id_raw", "ozon_client_id_raw"),
+        Index("idx_shipments_last_seen_import_session_id", "last_seen_import_session_id"),
     )
 
 class ExportSession(Base):

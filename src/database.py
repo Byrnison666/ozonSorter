@@ -1,5 +1,5 @@
 import os
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, Session
 from .models import Base
 
@@ -19,6 +19,25 @@ class DatabaseManager:
 
     def create_tables(self):
         Base.metadata.create_all(bind=self.engine)
+        self._migrate()
+
+    def _migrate(self):
+        # Идемпотентные миграции для БД, созданных ранними версиями. create_all не
+        # делает ALTER существующих таблиц, поэтому новые колонки добавляем вручную.
+        with self.engine.begin() as conn:
+            cols = [r[1] for r in conn.execute(text("PRAGMA table_info(shipments)"))]
+            if "last_seen_import_session_id" not in cols:
+                conn.execute(text(
+                    "ALTER TABLE shipments "
+                    "ADD COLUMN last_seen_import_session_id INTEGER"
+                ))
+                # Бэкфилл: для старых строк лучший доступный ориентир — сессия
+                # первой встречи. Со следующего импорта значение станет точным.
+                conn.execute(text(
+                    "UPDATE shipments "
+                    "SET last_seen_import_session_id = import_session_id "
+                    "WHERE last_seen_import_session_id IS NULL"
+                ))
 
     def get_session(self) -> Session:
         return self.SessionLocal()
