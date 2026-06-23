@@ -32,6 +32,17 @@ class ExcelParser:
         return sha256_hash.hexdigest()
 
     @staticmethod
+    def normalize_ozon_id(ozon_id) -> str:
+        """Канонический вид Ozon ID для сравнения: без ведущих нулей.
+
+        В отчёте Ozon id зачастую дополнен нулём слева (0224933356), а в базе
+        клиент мог быть заведён без него (224933356) — особенно после импорта из
+        Excel, где число теряет ведущий ноль. Сравниваем по числовому значению.
+        """
+        s = str(ozon_id).strip().lstrip('0')
+        return s or '0'
+
+    @staticmethod
     def extract_ozon_client_id(posting_number: str) -> Optional[str]:
         if not posting_number:
             return None

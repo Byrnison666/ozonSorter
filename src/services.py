@@ -51,20 +51,27 @@ class ImportService:
         import_session.not_ours_rows = 0
         import_session.errors_rows = 0
 
+        # Индекс активных клиентов по нормализованному Ozon ID (без ведущих нулей).
+        # Так совпадают «224933356» в базе и «0224933356» в отчёте. setdefault —
+        # при коллизии одинаковых номеров берём первого (это один и тот же клиент).
+        clients_by_norm = {}
+        for c in self.session.execute(
+            select(Client).where(Client.is_active == True)
+        ).scalars().all():
+            clients_by_norm.setdefault(self.parser.normalize_ozon_id(c.ozon_client_id), c)
+
         for row_data in rows:
             posting_number = row_data['posting_number']
             ozon_client_id = row_data['ozon_client_id']
-            
+
             if row_data['is_kty']:
                 import_session.kty_rows += 1
                 self._create_shipment(row_data, import_session.id, AssignmentStatus.EXCLUDED_KTY)
                 continue
-                
-            # Find client
-            client = self.session.execute(
-                select(Client).where(Client.ozon_client_id == ozon_client_id, Client.is_active == True)
-            ).scalar_one_or_none()
-            
+
+            # Find client (сравнение по числовому значению id, без ведущих нулей)
+            client = clients_by_norm.get(self.parser.normalize_ozon_id(ozon_client_id))
+
             if not client:
                 import_session.not_ours_rows += 1
                 self._create_shipment(row_data, import_session.id, AssignmentStatus.EXCLUDED_NOT_OURS)
