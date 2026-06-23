@@ -3,11 +3,12 @@ from PySide2.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QLabel, QTableWidget, QTableWidgetItem, QHeaderView,
     QDialog, QFormLayout, QLineEdit, QComboBox, QDialogButtonBox,
-    QMessageBox, QFrame, QAbstractItemView
+    QMessageBox, QFrame, QAbstractItemView, QFileDialog
 )
 from sqlalchemy import select
 
 from src.models import Client, DeliveryPointPolicy, DeliveryPoint
+from src.client_import_service import ClientImportService
 from .theme import make_badge
 
 
@@ -33,6 +34,14 @@ class ClientsScreen(QWidget):
         sub.setObjectName("subtitle")
         title_block.addWidget(sub)
         header.addLayout(title_block, 1)
+
+        self.template_btn = QPushButton("Шаблон")
+        self.template_btn.clicked.connect(self.on_download_template)
+        header.addWidget(self.template_btn, 0, Qt.AlignTop)
+
+        self.import_btn = QPushButton("Импорт из файла")
+        self.import_btn.clicked.connect(self.on_import_file)
+        header.addWidget(self.import_btn, 0, Qt.AlignTop)
 
         self.add_btn = QPushButton("+ Добавить клиента")
         self.add_btn.setObjectName("primary")
@@ -149,6 +158,57 @@ class ClientsScreen(QWidget):
                                  f"Не удалось добавить клиента:\n{e}")
         finally:
             session.close()
+
+    def on_download_template(self):
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "Сохранить шаблон", "Шаблон_клиентов.xlsx", "Excel Files (*.xlsx)"
+        )
+        if not file_path:
+            return
+        try:
+            ClientImportService.write_template(file_path)
+            QMessageBox.information(
+                self, "Шаблон сохранён",
+                f"Заполните файл и загрузите через «Импорт из файла»:\n{file_path}"
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка",
+                                 f"Не удалось сохранить шаблон:\n{e}")
+
+    def on_import_file(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Выберите файл с клиентами", "", "Excel Files (*.xlsx)"
+        )
+        if not file_path:
+            return
+
+        session = self.db_manager.get_session()
+        try:
+            result = ClientImportService(session).import_clients(file_path)
+        except Exception as e:
+            session.rollback()
+            QMessageBox.critical(self, "Ошибка импорта",
+                                 f"Не удалось импортировать файл:\n{e}")
+            return
+        finally:
+            session.close()
+
+        self.refresh_table()
+
+        msg = (
+            f"Обработано строк: {result.data_rows}\n"
+            f"Добавлено: {result.added}\n"
+            f"Обновлено: {result.updated}\n"
+            f"Ошибок: {len(result.errors)}"
+        )
+        if result.errors:
+            shown = result.errors[:10]
+            lines = "\n".join(f"  строка {r}: {m}" for r, m in shown)
+            more = f"\n  …ещё {len(result.errors) - len(shown)}" if len(result.errors) > len(shown) else ""
+            msg += f"\n\nНе загружены:\n{lines}{more}"
+            QMessageBox.warning(self, "Импорт завершён с ошибками", msg)
+        else:
+            QMessageBox.information(self, "Импорт завершён", msg)
 
 
 class ClientDialog(QDialog):
