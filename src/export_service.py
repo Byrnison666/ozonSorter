@@ -39,13 +39,17 @@ class ExportService:
         alignment = Alignment(wrap_text=True, vertical='top')
         
         for idx, shipment in enumerate(shipments, 1):
-            # Column 1: label and name
-            label = shipment.product_label or shipment.posting_number
-            name = shipment.product_name or ""
-            val_a = f"{label}\n{name}"
-            ws.cell(row=idx, column=1, value=val_a).alignment = alignment
-            
-            # Column 2: posting number
+            # Column 1: описание товара — только название. Этикетка из отчёта Ozon
+            # часто либо штрихкод (ii…), либо дубль номера отправления, поэтому в
+            # описание не идёт. Фоллбэк — этикетка, затем сам номер (на пустое имя).
+            description = (
+                shipment.product_name
+                or shipment.product_label
+                or shipment.posting_number
+            )
+            ws.cell(row=idx, column=1, value=description).alignment = alignment
+
+            # Column 2: номер отправления — первичный id посылки (в нём Ozon ID клиента)
             ws.cell(row=idx, column=2, value=shipment.posting_number).alignment = alignment
             
             # Column 3: cell

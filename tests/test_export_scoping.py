@@ -108,6 +108,17 @@ class ExportScopingTest(unittest.TestCase):
         self.assertEqual(count, 1)
         self.assertEqual(postings, ["111-A-1"])
 
+    def test_description_column_is_product_name(self):
+        # Колонка A — описание = название товара (не этикетка/номер).
+        out = os.path.join(tempfile.gettempdir(), "exp_desc.xlsx")
+        self.export.generate_export(DeliveryPoint.KOMSOMOLSKAYA_4, out, self.day2.id)
+        wb = openpyxl.load_workbook(out)
+        descriptions = [row[0] for row in wb.active.iter_rows(values_only=True) if row[0]]
+        os.remove(out)
+        self.assertTrue(descriptions)
+        self.assertTrue(all(d == "Товар" for d in descriptions),
+                        f"описание должно быть названием товара, получено: {descriptions}")
+
     def test_unknown_import_session_raises(self):
         with self.assertRaises(ValueError):
             self.export.generate_export(DeliveryPoint.KOMSOMOLSKAYA_4, "x.xlsx", 99999)
