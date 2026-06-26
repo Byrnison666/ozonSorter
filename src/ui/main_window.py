@@ -124,7 +124,7 @@ class MainWindow(QMainWindow):
 
         layout.addStretch()
 
-        footer = QLabel("v1.5  •  локальная БД")
+        footer = QLabel("v1.5.1  •  локальная БД")
         footer.setObjectName("sidebarFooter")
         layout.addWidget(footer)
 
