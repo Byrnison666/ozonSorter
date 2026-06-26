@@ -59,13 +59,31 @@ class ImportService:
         ).scalars().all():
             clients_by_norm.setdefault(self.parser.normalize_ozon_id(c.ozon_client_id), c)
 
+        # posting_number из этого файла, уже обработанные в текущем импорте.
+        # Отчёты Ozon нередко содержат дубли строк — вторую встречу пропускаем,
+        # иначе при ещё не сброшенном INSERT упадёт UNIQUE.
+        seen_in_file = set()
+
         for row_data in rows:
             posting_number = row_data['posting_number']
             ozon_client_id = row_data['ozon_client_id']
 
+            if posting_number in seen_in_file:
+                continue
+            seen_in_file.add(posting_number)
+
+            # Посылка могла встречаться в прошлых импортах — тогда не вставляем
+            # заново (UNIQUE posting_number), а только двигаем last_seen.
+            existing_shipment = self.session.execute(
+                select(Shipment).where(Shipment.posting_number == posting_number)
+            ).scalar_one_or_none()
+
             if row_data['is_kty']:
                 import_session.kty_rows += 1
-                self._create_shipment(row_data, import_session.id, AssignmentStatus.EXCLUDED_KTY)
+                if existing_shipment:
+                    self._touch(existing_shipment, import_session.id)
+                else:
+                    self._create_shipment(row_data, import_session.id, AssignmentStatus.EXCLUDED_KTY)
                 continue
 
             # Find client (сравнение по числовому значению id, без ведущих нулей)
@@ -73,19 +91,16 @@ class ImportService:
 
             if not client:
                 import_session.not_ours_rows += 1
-                self._create_shipment(row_data, import_session.id, AssignmentStatus.EXCLUDED_NOT_OURS)
+                if existing_shipment:
+                    self._touch(existing_shipment, import_session.id)
+                else:
+                    self._create_shipment(row_data, import_session.id, AssignmentStatus.EXCLUDED_NOT_OURS)
                 continue
-            
+
             import_session.matched_rows += 1
-            
-            # Check existing shipment
-            existing_shipment = self.session.execute(
-                select(Shipment).where(Shipment.posting_number == posting_number)
-            ).scalar_one_or_none()
-            
+
             if existing_shipment:
-                existing_shipment.last_seen_at = datetime.now()
-                existing_shipment.last_seen_import_session_id = import_session.id
+                self._touch(existing_shipment, import_session.id)
                 if existing_shipment.assignment_status == AssignmentStatus.ON_POINT:
                     import_session.already_on_point += 1
                     logs.append(f"Shipment {posting_number} already on point.")
@@ -109,6 +124,11 @@ class ImportService:
         import_session.log_json = json.dumps(logs)
         self.session.commit()
         return import_session
+
+    def _touch(self, shipment: Shipment, session_id: int):
+        """Отметить, что посылка встречена в текущем импорте (без смены статуса)."""
+        shipment.last_seen_at = datetime.now()
+        shipment.last_seen_import_session_id = session_id
 
     def _create_shipment(self, row_data: Dict[str, Any], session_id: int, status: AssignmentStatus, client_id: Optional[int] = None, assigned_point: Optional[DeliveryPoint] = None):
         shipment = Shipment(
