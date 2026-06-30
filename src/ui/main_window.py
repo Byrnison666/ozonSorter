@@ -8,7 +8,7 @@ from PySide2.QtWidgets import (
 
 from .dashboard_screen import DashboardScreen
 from .clients_screen import ClientsScreen
-from .issue_screen import IssueScreen
+from .import_log_screen import ImportLogScreen
 
 
 NAV_STRUCTURE = [
@@ -17,7 +17,6 @@ NAV_STRUCTURE = [
     ]),
     ("РАБОТА", [
         ("Клиенты", "clients"),
-        ("Выдача", "issue"),
     ]),
     ("СИСТЕМА", [
         ("Журнал импортов", "import_log"),
@@ -63,11 +62,7 @@ class MainWindow(QMainWindow):
         self._screens = {
             "dashboard": DashboardScreen(self.db_manager, self),
             "clients": ClientsScreen(self.db_manager, self),
-            "issue": IssueScreen(self.db_manager, self),
-            "import_log": self._placeholder_screen(
-                "Журнал импортов",
-                "История всех загрузок с детализацией по строкам.",
-            ),
+            "import_log": ImportLogScreen(self.db_manager, self),
             "settings": self._placeholder_screen(
                 "Настройки",
                 "Папки сохранения, политика существующих файлов, бэкап БД.",
@@ -118,7 +113,7 @@ class MainWindow(QMainWindow):
 
         layout.addStretch()
 
-        footer = QLabel("v1.6.3  •  локальная БД")
+        footer = QLabel("v1.6.4  •  локальная БД")
         footer.setObjectName("sidebarFooter")
         layout.addWidget(footer)
 
