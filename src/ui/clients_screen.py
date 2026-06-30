@@ -9,6 +9,7 @@ from sqlalchemy import select
 
 from src.models import Client, DeliveryPoint
 from src.client_import_service import ClientImportService
+from src.parser import ExcelParser
 
 
 class ClientsScreen(QWidget):
@@ -134,9 +135,13 @@ class ClientsScreen(QWidget):
 
         session = self.db_manager.get_session()
         try:
-            existing = session.execute(
-                select(Client).where(Client.ozon_client_id == data['ozon_client_id'])
-            ).scalar_one_or_none()
+            # Сравнение по нормализованному id: «0224…» и «224…» — один клиент.
+            norm = ExcelParser.normalize_ozon_id(data['ozon_client_id'])
+            existing = next(
+                (c for c in session.execute(select(Client)).scalars()
+                 if ExcelParser.normalize_ozon_id(c.ozon_client_id) == norm),
+                None,
+            )
             if existing:
                 QMessageBox.warning(
                     self, "Дубликат",
@@ -145,7 +150,7 @@ class ClientsScreen(QWidget):
                 return
 
             session.add(Client(
-                ozon_client_id=data['ozon_client_id'],
+                ozon_client_id=norm,
                 full_name=data['full_name'] or None,
                 phone=data['phone'] or None,
                 fixed_delivery_point=DeliveryPoint(data['point']),
@@ -182,14 +187,15 @@ class ClientsScreen(QWidget):
             if not self._validate(data):
                 return
 
-            # Запрет на смену id в чужой существующий
-            if data['ozon_client_id'] != client.ozon_client_id:
-                clash = session.execute(
-                    select(Client).where(
-                        Client.ozon_client_id == data['ozon_client_id'],
-                        Client.id != client.id,
-                    )
-                ).scalar_one_or_none()
+            # Запрет на смену id в чужой существующий (сравнение по нормализованному).
+            norm = ExcelParser.normalize_ozon_id(data['ozon_client_id'])
+            if norm != ExcelParser.normalize_ozon_id(client.ozon_client_id):
+                clash = next(
+                    (c for c in session.execute(select(Client)).scalars()
+                     if c.id != client.id
+                     and ExcelParser.normalize_ozon_id(c.ozon_client_id) == norm),
+                    None,
+                )
                 if clash:
                     QMessageBox.warning(
                         self, "Дубликат",
@@ -197,7 +203,7 @@ class ClientsScreen(QWidget):
                     )
                     return
 
-            client.ozon_client_id = data['ozon_client_id']
+            client.ozon_client_id = norm
             client.full_name = data['full_name'] or None
             client.phone = data['phone'] or None
             client.fixed_delivery_point = DeliveryPoint(data['point'])

@@ -94,6 +94,7 @@ class DashboardScreen(QWidget):
         _, self.tile_matched = make_stat_tile(tiles_layout, "Наших", "0")
         _, self.tile_new = make_stat_tile(tiles_layout, "Новых к отгрузке", "0")
         _, self.tile_on_point = make_stat_tile(tiles_layout, "Уже на точках", "0")
+        _, self.tile_returned = make_stat_tile(tiles_layout, "Возвраты", "0")
         _, self.tile_not_ours = make_stat_tile(tiles_layout, "Не наши", "0")
         _, self.tile_kty = make_stat_tile(tiles_layout, "КТЯ", "0")
         stats_layout.addLayout(tiles_layout)
@@ -163,6 +164,7 @@ class DashboardScreen(QWidget):
             self.tile_matched.setText(str(session.matched_rows))
             self.tile_new.setText(str(session.new_to_ship_rows))
             self.tile_on_point.setText(str(session.already_on_point))
+            self.tile_returned.setText(str(session.returned_rows))
             self.tile_not_ours.setText(str(session.not_ours_rows))
             self.tile_kty.setText(str(session.kty_rows))
 

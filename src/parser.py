@@ -12,6 +12,11 @@ class ExcelParser:
     # (см. COLUMN_MAP), парсинг строк к их отсутствию устойчив.
     SIGNATURE_COLUMNS = ['Номер отправления', 'Ячейка']
 
+    # Значение колонки «Статус», при котором посылку реально можно забрать со
+    # склада Казакова. Прочие статусы («Отправить на склад», «Вернуть продавцу»)
+    # — возврат, в отгрузку не идут.
+    READY_STATUS = 'Готово к выдаче'
+
     COLUMN_MAP = {
         'Этикетка\nНазвание': 'label_and_name',
         'Номер отправления': 'posting_number',
@@ -41,6 +46,17 @@ class ExcelParser:
         """
         s = str(ozon_id).strip().lstrip('0')
         return s or '0'
+
+    @staticmethod
+    def is_ready_for_pickup(status) -> bool:
+        """Готова ли посылка к выдаче со склада по колонке «Статус».
+
+        Старый формат отчёта без колонки «Статус» → считаем готовой, чтобы не
+        ломать обработку прежних файлов (status приходит None/пустым).
+        """
+        if status is None or str(status).strip() == '':
+            return True
+        return str(status).strip().lower() == ExcelParser.READY_STATUS.lower()
 
     @staticmethod
     def extract_ozon_client_id(posting_number: str) -> Optional[str]:

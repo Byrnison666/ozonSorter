@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .models import Client, DeliveryPoint
+from .parser import ExcelParser
 
 
 # Логическое имя колонки -> допустимые заголовки (нормализованные: lower, без пробелов).
@@ -85,6 +86,19 @@ class ClientImportService:
                 "Скачайте шаблон и заполните его."
             )
 
+        # Существующие клиенты по нормализованному Ozon ID (без ведущих нулей).
+        # Так «0224933356» из файла найдёт уже заведённого «224933356» — иначе
+        # создавался бы второй клиент на одного человека, и матчинг посылок (он
+        # тоже нормализует) молча отдавал бы посылку лишь одному из них.
+        existing_by_norm: Dict[str, Client] = {}
+        for c in self.session.execute(select(Client)).scalars().all():
+            existing_by_norm.setdefault(ExcelParser.normalize_ozon_id(c.ozon_client_id), c)
+
+        # Уже обработанные в этом файле id (нормализованные) → (строка, parsed).
+        # Защита от дубля строки в одном файле: повтор с теми же данными молча
+        # пропускаем, с другими (другая точка/ФИО) — сообщаем конфликт.
+        seen_in_file: Dict[str, Tuple[int, Dict]] = {}
+
         result = ImportResult()
         for row_idx, row in enumerate(
             ws.iter_rows(min_row=header_row_idx + 1, values_only=True),
@@ -100,23 +114,41 @@ class ClientImportService:
                 result.errors.append((row_idx, err))
                 continue
 
-            existing = self.session.execute(
-                select(Client).where(Client.ozon_client_id == parsed["ozon_client_id"])
-            ).scalar_one_or_none()
+            norm = ExcelParser.normalize_ozon_id(parsed["ozon_client_id"])
 
-            if existing:
-                existing.full_name = parsed["full_name"]
-                existing.phone = parsed["phone"]
-                existing.fixed_delivery_point = parsed["point"]
-                existing.is_active = True
+            prev = seen_in_file.get(norm)
+            if prev is not None:
+                prev_idx, prev_parsed = prev
+                if (prev_parsed["point"] != parsed["point"]
+                        or prev_parsed["full_name"] != parsed["full_name"]
+                        or prev_parsed["phone"] != parsed["phone"]):
+                    result.errors.append((
+                        row_idx,
+                        f"Ozon ID {parsed['ozon_client_id']} уже в строке {prev_idx} "
+                        f"с другими данными — конфликт, строка пропущена",
+                    ))
+                # одинаковый дубль строки — молча пропускаем
+                continue
+            seen_in_file[norm] = (row_idx, parsed)
+
+            client = existing_by_norm.get(norm)
+            if client is not None:
+                # Канонизируем хранимый id (старые записи могли быть с нулём).
+                client.ozon_client_id = norm
+                client.full_name = parsed["full_name"]
+                client.phone = parsed["phone"]
+                client.fixed_delivery_point = parsed["point"]
+                client.is_active = True
                 result.updated += 1
             else:
-                self.session.add(Client(
-                    ozon_client_id=parsed["ozon_client_id"],
+                client = Client(
+                    ozon_client_id=norm,
                     full_name=parsed["full_name"],
                     phone=parsed["phone"],
                     fixed_delivery_point=parsed["point"],
-                ))
+                )
+                self.session.add(client)
+                existing_by_norm[norm] = client
                 result.added += 1
 
         self.session.commit()

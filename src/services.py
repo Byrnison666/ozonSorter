@@ -47,6 +47,7 @@ class ImportService:
         import_session.matched_rows = 0
         import_session.new_to_ship_rows = 0
         import_session.already_on_point = 0
+        import_session.returned_rows = 0
         import_session.not_ours_rows = 0
         import_session.errors_rows = 0
 
@@ -98,19 +99,36 @@ class ImportService:
                 continue
 
             import_session.matched_rows += 1
+            is_ready = self.parser.is_ready_for_pickup(row_data.get('status'))
 
             if existing_shipment:
                 self._touch(existing_shipment, import_session.id)
-                if existing_shipment.assignment_status == AssignmentStatus.ON_POINT:
+                if not is_ready:
+                    # Возврат: снять с отгрузки. Уже привезённые/на точке не трогаем
+                    # — их мы физически забрали раньше, склад их назад не заберёт.
+                    if existing_shipment.assignment_status in (
+                        AssignmentStatus.TO_SHIP, AssignmentStatus.TO_ASSIGN
+                    ):
+                        existing_shipment.assignment_status = AssignmentStatus.RETURNED
+                    existing_shipment.ozon_status = row_data.get('status')
+                    import_session.returned_rows += 1
+                elif existing_shipment.assignment_status == AssignmentStatus.ON_POINT:
                     import_session.already_on_point += 1
                     logs.append(f"Shipment {posting_number} already on point.")
                 elif existing_shipment.assignment_status == AssignmentStatus.DELIVERED:
                     logs.append(f"WARNING: Shipment {posting_number} marked as DELIVERED but seen again in import.")
+                elif existing_shipment.assignment_status == AssignmentStatus.RETURNED:
+                    # Раньше была возвратом, в отчёте снова «Готово к выдаче» —
+                    # вернуть в отгрузку на точку клиента.
+                    existing_shipment.assignment_status = AssignmentStatus.TO_SHIP
+                    existing_shipment.assigned_point = client.fixed_delivery_point
+                    existing_shipment.ozon_status = row_data.get('status')
+                    import_session.new_to_ship_rows += 1
                 else:
                     # Keep existing assignment status and point
                     pass
-            else:
-                # Новая посылка: всегда к отгрузке на точку клиента.
+            elif is_ready:
+                # Новая посылка, готова к выдаче: к отгрузке на точку клиента.
                 self._create_shipment(
                     row_data,
                     import_session.id,
@@ -119,6 +137,17 @@ class ImportService:
                     assigned_point=client.fixed_delivery_point,
                 )
                 import_session.new_to_ship_rows += 1
+            else:
+                # Новая посылка нашего клиента, но это возврат — фиксируем (видна в
+                # «Контроле»), в отгрузку не ставим.
+                self._create_shipment(
+                    row_data,
+                    import_session.id,
+                    AssignmentStatus.RETURNED,
+                    client_id=client.id,
+                    assigned_point=client.fixed_delivery_point,
+                )
+                import_session.returned_rows += 1
                 
         import_session.finished_at = datetime.now()
         import_session.log_json = json.dumps(logs)

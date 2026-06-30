@@ -14,6 +14,7 @@ _STATUS_BADGE = {
     AssignmentStatus.TO_SHIP: ("К отгрузке", "info"),
     AssignmentStatus.ON_POINT: ("На точке", "warning"),
     AssignmentStatus.DELIVERED: ("Выдана", "success"),
+    AssignmentStatus.RETURNED: ("Возврат", "danger"),
 }
 
 _POINT_LABEL = {
@@ -69,6 +70,7 @@ class ControlScreen(QWidget):
         self.status_combo.addItem("К отгрузке", AssignmentStatus.TO_SHIP)
         self.status_combo.addItem("На точке", AssignmentStatus.ON_POINT)
         self.status_combo.addItem("Выдана", AssignmentStatus.DELIVERED)
+        self.status_combo.addItem("Возврат", AssignmentStatus.RETURNED)
         self.status_combo.currentIndexChanged.connect(self.refresh_table)
         filters.addWidget(self.status_combo)
         bar_lay.addLayout(filters)

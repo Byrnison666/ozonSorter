@@ -22,7 +22,7 @@ def _make_report(postings):
     ws = wb.active
     ws.append(["Этикетка\nНазвание", "Номер отправления", "Тип", "Статус", "Ячейка"])
     for p in postings:
-        ws.append([f"LBL\n{p}", p, "Обычный", "Готов", "A-01"])
+        ws.append([f"LBL\n{p}", p, "Обычный", "Готово к выдаче", "A-01"])
     wb.save(path)
     return path
 

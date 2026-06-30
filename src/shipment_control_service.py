@@ -15,6 +15,7 @@ CONTROL_STATUSES = (
     AssignmentStatus.TO_SHIP,
     AssignmentStatus.ON_POINT,
     AssignmentStatus.DELIVERED,
+    AssignmentStatus.RETURNED,
 )
 
 

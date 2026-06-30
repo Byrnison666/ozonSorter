@@ -19,6 +19,9 @@ class AssignmentStatus(str, PyEnum):
     TO_SHIP = "TO_SHIP"
     ON_POINT = "ON_POINT"
     DELIVERED = "DELIVERED"
+    # Наша посылка, но в отчёте склада со статусом возврата (на склад / продавцу)
+    # — забрать нельзя, из отгрузки исключаем, но в «Контроле» видна.
+    RETURNED = "RETURNED"
     EXCLUDED_NOT_OURS = "EXCLUDED_NOT_OURS"
     EXCLUDED_KTY = "EXCLUDED_KTY"
 
@@ -58,6 +61,7 @@ class ImportSession(Base):
     matched_rows: Mapped[int] = mapped_column(Integer, default=0)
     new_to_ship_rows: Mapped[int] = mapped_column(Integer, default=0)
     already_on_point: Mapped[int] = mapped_column(Integer, default=0)
+    returned_rows: Mapped[int] = mapped_column(Integer, default=0)
     not_ours_rows: Mapped[int] = mapped_column(Integer, default=0)
     errors_rows: Mapped[int] = mapped_column(Integer, default=0)
     log_json: Mapped[Optional[str]] = mapped_column(Text)

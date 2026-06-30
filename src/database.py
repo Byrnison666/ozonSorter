@@ -25,6 +25,12 @@ class DatabaseManager:
         # Идемпотентные миграции для БД, созданных ранними версиями. create_all не
         # делает ALTER существующих таблиц, поэтому новые колонки добавляем вручную.
         with self.engine.begin() as conn:
+            icols = [r[1] for r in conn.execute(text("PRAGMA table_info(import_sessions)"))]
+            if "returned_rows" not in icols:
+                conn.execute(text(
+                    "ALTER TABLE import_sessions ADD COLUMN returned_rows INTEGER DEFAULT 0"
+                ))
+
             cols = [r[1] for r in conn.execute(text("PRAGMA table_info(shipments)"))]
             if "last_seen_import_session_id" not in cols:
                 conn.execute(text(
