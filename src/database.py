@@ -2,6 +2,7 @@ import os
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, Session
 from .models import Base
+from .parser import ExcelParser
 
 # Default DB path in AppData if not specified
 APP_DATA_DIR = os.path.join(os.environ.get('APPDATA', os.path.expanduser('~')), 'OzonSorter')
@@ -76,6 +77,39 @@ class DatabaseManager:
                 conn.execute(text(
                     "CREATE INDEX idx_clients_is_active ON clients (is_active)"
                 ))
+
+            # Дедуп клиентов-дублей по нормализованному Ozon ID (lstrip нулей).
+            # Базы до v1.6 могли накопить «0224933356» и «224933356» как два
+            # клиента на одного: матчинг (он нормализует) молча отдавал посылку
+            # лишь одному, а импорт v1.6 при канонизации id падал UNIQUE. Сводим
+            # в одного: посылки перецепляем на выжившего, лишних удаляем, id
+            # канонизируем. Выживший — наименьший id (старейшая запись).
+            # Идемпотентно: после прогона на каждый норм-id ровно одна запись.
+            client_rows = list(conn.execute(text(
+                "SELECT id, ozon_client_id FROM clients"
+            )))
+            groups: dict = {}
+            for cid, oid in client_rows:
+                groups.setdefault(ExcelParser.normalize_ozon_id(oid), []).append((cid, oid))
+            for norm, members in groups.items():
+                members.sort(key=lambda m: m[0])
+                survivor_id, survivor_oid = members[0]
+                for loser_id, _ in members[1:]:
+                    conn.execute(
+                        text("UPDATE shipments SET client_id = :s WHERE client_id = :l"),
+                        {"s": survivor_id, "l": loser_id},
+                    )
+                    conn.execute(
+                        text("DELETE FROM clients WHERE id = :l"),
+                        {"l": loser_id},
+                    )
+                # Канонизируем хранимый id выжившего (после удаления дублей —
+                # коллизии UNIQUE уже нет).
+                if survivor_oid != norm:
+                    conn.execute(
+                        text("UPDATE clients SET ozon_client_id = :n WHERE id = :i"),
+                        {"n": norm, "i": survivor_id},
+                    )
 
     def get_session(self) -> Session:
         return self.SessionLocal()
