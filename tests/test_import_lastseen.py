@@ -80,6 +80,15 @@ class ImportLastSeenTest(unittest.TestCase):
         es1 = self.export.generate_export(DeliveryPoint.KOMSOMOLSKAYA_4, out1, day1.id)
         self.assertEqual(es1.shipments_count, 0)
 
+    def test_find_duplicate_import_detects_same_file(self):
+        path = _make_report(["111-AAA-1"])
+        self._files.append(path)
+        self.assertIsNone(self.importer.find_duplicate_import(path),
+                          "до импорта дубля нет")
+        self.importer.process_import(path)
+        dup = self.importer.find_duplicate_import(path)
+        self.assertIsNotNone(dup, "тот же файл (sha256) определяется как повтор")
+
     def test_picked_up_shipment_drops_from_next_report(self):
         # День 1: посылки X и Y. День 2: X забрали — в отчёте только Y.
         day1 = self._import(["111-X-1", "111-Y-1"])

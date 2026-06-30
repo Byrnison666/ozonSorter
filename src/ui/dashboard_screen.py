@@ -155,6 +155,17 @@ class DashboardScreen(QWidget):
         if not file_path:
             return
 
+        dup = self.import_service.find_duplicate_import(file_path)
+        if dup is not None:
+            when = dup.started_at.strftime("%d.%m.%Y %H:%M") if dup.started_at else "?"
+            if QMessageBox.question(
+                self, "Файл уже загружали",
+                f"Этот файл уже импортировали {when} («{dup.source_file_name}»).\n"
+                f"Загрузить повторно?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+            ) != QMessageBox.Yes:
+                return
+
         try:
             session = self.import_service.process_import(file_path)
             self.last_import_session_id = session.id

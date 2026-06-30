@@ -13,6 +13,14 @@ class ImportService:
         self.session = db_session
         self.parser = ExcelParser()
 
+    def find_duplicate_import(self, file_path: str) -> Optional[ImportSession]:
+        """Сессия, в которой этот файл (по sha256) уже импортировали, либо None.
+        Нужна, чтобы предупредить о повторной загрузке того же отчёта."""
+        file_hash = self.parser.get_file_sha256(file_path)
+        return self.session.execute(
+            select(ImportSession).where(ImportSession.source_file_sha256 == file_hash)
+        ).scalar_one_or_none()
+
     def process_import(self, file_path: str) -> ImportSession:
         file_hash = self.parser.get_file_sha256(file_path)
         
@@ -119,14 +127,19 @@ class ImportService:
                     logs.append(f"WARNING: Shipment {posting_number} marked as DELIVERED but seen again in import.")
                 elif existing_shipment.assignment_status == AssignmentStatus.RETURNED:
                     # Раньше была возвратом, в отчёте снова «Готово к выдаче» —
-                    # вернуть в отгрузку на точку клиента.
+                    # вернуть в отгрузку на точку клиента. Сбрасываем отметку
+                    # выгрузки: посылку мы так и не забрали, она снова доступна и
+                    # обязана попасть в отчёт отгрузки.
                     existing_shipment.assignment_status = AssignmentStatus.TO_SHIP
                     existing_shipment.assigned_point = client.fixed_delivery_point
                     existing_shipment.ozon_status = row_data.get('status')
+                    existing_shipment.exported_import_session_id = None
                     import_session.new_to_ship_rows += 1
                 else:
-                    # Keep existing assignment status and point
-                    pass
+                    # Ещё не привезённая посылка (TO_SHIP/TO_ASSIGN): синхронизируем
+                    # точку с актуальной у клиента — если её сменили, посылка не
+                    # должна уехать на старую точку.
+                    existing_shipment.assigned_point = client.fixed_delivery_point
             elif is_ready:
                 # Новая посылка, готова к выдаче: к отгрузке на точку клиента.
                 self._create_shipment(

@@ -82,6 +82,25 @@ class ExportOnceTest(unittest.TestCase):
         self.assertEqual(set(self._export(d1.id)), {"111-0001-1", "111-0002-1"},
                          "регенерация того же дня не съедает посылки")
 
+    def test_returned_then_ready_again_re_exported(self):
+        # Выгрузили → посылка ушла в возврат → снова «Готово к выдаче».
+        # Мы её так и не забрали, значит обязана снова попасть в отгрузку.
+        d1 = self._import(["111-0001-1"])
+        self.assertEqual(self._export(d1.id), ["111-0001-1"])
+
+        # День 2: возврат.
+        path2 = tempfile.mktemp(suffix=".xlsx"); self._files.append(path2)
+        wb = openpyxl.Workbook(); ws = wb.active
+        ws.append(["Этикетка\nНазвание", "Номер отправления", "Статус", "Ячейка"])
+        ws.append(["L\n111-0001-1", "111-0001-1", "Отправить на склад", "A-1"])
+        wb.save(path2)
+        self.imp.process_import(path2)
+
+        # День 3: снова готова к выдаче.
+        d3 = self._import(["111-0001-1"])
+        self.assertEqual(self._export(d3.id), ["111-0001-1"],
+                         "вернувшаяся и снова готовая посылка должна выгрузиться")
+
     def test_export_count_reflects_dedup(self):
         d1 = self._import(["111-0001-1"])
         self._export(d1.id)
