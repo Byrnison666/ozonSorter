@@ -96,6 +96,12 @@ class Shipment(Base):
     last_seen_import_session_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("import_sessions.id")
     )
+    # Сессия импорта, в выгрузку-отгрузку которой посылка уже попала. Пока стоит,
+    # в выгрузки следующих отчётов посылка не валится повторно (она лежит на
+    # складе день за днём). NULL = ещё ни разу не выгружена.
+    exported_import_session_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("import_sessions.id")
+    )
     first_seen_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
     shipped_to_point_at: Mapped[Optional[datetime]] = mapped_column(DateTime)

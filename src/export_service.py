@@ -2,7 +2,7 @@ import os
 from datetime import datetime
 from typing import List
 from sqlalchemy.orm import Session
-from sqlalchemy import select
+from sqlalchemy import select, or_
 import openpyxl
 from openpyxl.styles import PatternFill, Alignment, Border, Side
 from .models import Shipment, AssignmentStatus, DeliveryPoint, ExportSession, ImportSession
@@ -20,10 +20,18 @@ class ExportService:
         # строке last_seen_import_session_id = id своей сессии. «Видели в этом отчёте»
         # = физически лежит на Казакова 68. Без этого условия TO_SHIP копится по всем
         # прошлым импортам и в файл попадают уже забранные с Донецка посылки.
+        # Дедуп между отчётами: посылку, уже попавшую в выгрузку прошлой сессии,
+        # повторно не показываем (она лежит на складе день за днём). Выгруженные
+        # в ЭТОЙ же сессии пропускаем — чтобы повторная генерация того же отчёта
+        # воспроизводила файл целиком, а не отдавала пустой.
         stmt = select(Shipment).where(
             Shipment.assigned_point == delivery_point,
             Shipment.assignment_status == AssignmentStatus.TO_SHIP,
             Shipment.last_seen_import_session_id == import_session_id,
+            or_(
+                Shipment.exported_import_session_id.is_(None),
+                Shipment.exported_import_session_id == import_session_id,
+            ),
         )
         shipments = self.session.execute(stmt).scalars().all()
         
@@ -70,6 +78,10 @@ class ExportService:
         
         wb.save(output_path)
         
+        # Отметить выгруженные — в отчёты следующих сессий они уже не попадут.
+        for shipment in shipments:
+            shipment.exported_import_session_id = import_session_id
+
         export_session = ExportSession(
             import_session_id=import_session_id,
             delivery_point=delivery_point,

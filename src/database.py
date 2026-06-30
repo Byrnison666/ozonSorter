@@ -33,6 +33,11 @@ class DatabaseManager:
                 ))
 
             cols = [r[1] for r in conn.execute(text("PRAGMA table_info(shipments)"))]
+            if "exported_import_session_id" not in cols:
+                conn.execute(text(
+                    "ALTER TABLE shipments "
+                    "ADD COLUMN exported_import_session_id INTEGER"
+                ))
             if "last_seen_import_session_id" not in cols:
                 conn.execute(text(
                     "ALTER TABLE shipments "
