@@ -50,6 +50,100 @@ class DatabaseManager:
                     "SET last_seen_import_session_id = import_session_id "
                     "WHERE last_seen_import_session_id IS NULL"
                 ))
+            if "barcode" not in cols:
+                # Колонка есть в модели с начала, но старейшие базы могли её не
+                # иметь; нужна до rebuild ниже (перечисляем её в INSERT SELECT).
+                conn.execute(text("ALTER TABLE shipments ADD COLUMN barcode VARCHAR"))
+
+            # Смена ключа идентификации посылки: было UNIQUE(posting_number), стало
+            # UNIQUE(posting_number, product_label). Один и тот же номер отправления
+            # Ozon может прийти для физически другого товара (переиспользована
+            # ячейка, другой штрихкод того же клиента) — старая схема схлопывала их
+            # в дубль. SQLite не меняет UNIQUE через ALTER, поэтому перестраиваем
+            # таблицу. Детект: есть ли unique-индекс ровно по одной колонке
+            # posting_number (после rebuild такого не останется → идемпотентно).
+            needs_rebuild = False
+            for idx in conn.execute(text("PRAGMA index_list(shipments)")):
+                idx_name, is_unique = idx[1], idx[2]
+                if not is_unique:
+                    continue
+                idx_cols = [r[2] for r in conn.execute(
+                    text(f"PRAGMA index_info('{idx_name}')")
+                )]
+                if idx_cols == ["posting_number"]:
+                    needs_rebuild = True
+                    break
+
+            if needs_rebuild:
+                # Пустой/NULL штрихкод → номер отправления: NULL в UNIQUE SQLite
+                # считает различным, дубли не поймались бы. В боевых базах этикетка
+                # почти всегда заполнена (первая строка «Этикетка»).
+                conn.execute(text(
+                    "UPDATE shipments SET product_label = posting_number "
+                    "WHERE product_label IS NULL OR product_label = ''"
+                ))
+                # Колонки перечисляем по именам (ALTER ADD COLUMN дописывает в конец,
+                # физический порядок мог разойтись с моделью). FK-проверка SQLite по
+                # умолчанию выключена → DROP/RENAME безопасны, id сохраняются,
+                # ссылки clients.id/import_sessions.id остаются валидными.
+                ship_cols = (
+                    "id, posting_number, client_id, ozon_client_id_raw, product_label,"
+                    " product_name, ozon_type, ozon_status, cell, shipment_date_ozon,"
+                    " is_damaged, is_kty, barcode, assignment_status, assigned_point,"
+                    " import_session_id, last_seen_import_session_id,"
+                    " exported_import_session_id, first_seen_at, last_seen_at,"
+                    " shipped_to_point_at, delivered_at, notes"
+                )
+                conn.execute(text(
+                    "CREATE TABLE shipments_new ("
+                    " id INTEGER NOT NULL PRIMARY KEY,"
+                    " posting_number VARCHAR NOT NULL,"
+                    " client_id INTEGER,"
+                    " ozon_client_id_raw VARCHAR NOT NULL,"
+                    " product_label VARCHAR,"
+                    " product_name VARCHAR,"
+                    " ozon_type VARCHAR,"
+                    " ozon_status VARCHAR,"
+                    " cell VARCHAR,"
+                    " shipment_date_ozon DATETIME,"
+                    " is_damaged BOOLEAN,"
+                    " is_kty BOOLEAN,"
+                    " barcode VARCHAR,"
+                    " assignment_status VARCHAR NOT NULL,"
+                    " assigned_point VARCHAR,"
+                    " import_session_id INTEGER,"
+                    " last_seen_import_session_id INTEGER,"
+                    " exported_import_session_id INTEGER,"
+                    " first_seen_at DATETIME,"
+                    " last_seen_at DATETIME,"
+                    " shipped_to_point_at DATETIME,"
+                    " delivered_at DATETIME,"
+                    " notes TEXT,"
+                    " UNIQUE (posting_number, product_label)"
+                    ")"
+                ))
+                conn.execute(text(
+                    f"INSERT INTO shipments_new ({ship_cols}) "
+                    f"SELECT {ship_cols} FROM shipments"
+                ))
+                conn.execute(text("DROP TABLE shipments"))
+                conn.execute(text("ALTER TABLE shipments_new RENAME TO shipments"))
+                conn.execute(text(
+                    "CREATE INDEX idx_shipments_assignment_status"
+                    " ON shipments (assignment_status)"
+                ))
+                conn.execute(text(
+                    "CREATE INDEX idx_shipments_assigned_point"
+                    " ON shipments (assigned_point)"
+                ))
+                conn.execute(text(
+                    "CREATE INDEX idx_shipments_ozon_client_id_raw"
+                    " ON shipments (ozon_client_id_raw)"
+                ))
+                conn.execute(text(
+                    "CREATE INDEX idx_shipments_last_seen_import_session_id"
+                    " ON shipments (last_seen_import_session_id)"
+                ))
 
             # Удаление колонки delivery_point_policy из clients. DROP COLUMN не
             # проходит из-за CHECK-констрейнта на неё, поэтому перестраиваем таблицу.

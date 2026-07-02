@@ -68,23 +68,32 @@ class ImportService:
         ).scalars().all():
             clients_by_norm.setdefault(self.parser.normalize_ozon_id(c.ozon_client_id), c)
 
-        # posting_number из этого файла, уже обработанные в текущем импорте.
-        # Отчёты Ozon нередко содержат дубли строк — вторую встречу пропускаем,
-        # иначе при ещё не сброшенном INSERT упадёт UNIQUE.
+        # Ключи (номер отправления + штрихкод) из этого файла, уже обработанные в
+        # текущем импорте. Отчёты Ozon нередко содержат дубли строк — вторую
+        # встречу пропускаем, иначе при ещё не сброшенном INSERT упадёт UNIQUE.
+        # Разные посылки одного клиента в одной ячейке различаются штрихкодом, а
+        # не только номером, поэтому ключ составной.
         seen_in_file = set()
 
         for row_data in rows:
             posting_number = row_data['posting_number']
+            product_label = row_data['product_label']
             ozon_client_id = row_data['ozon_client_id']
 
-            if posting_number in seen_in_file:
+            key = (posting_number, product_label)
+            if key in seen_in_file:
                 continue
-            seen_in_file.add(posting_number)
+            seen_in_file.add(key)
 
             # Посылка могла встречаться в прошлых импортах — тогда не вставляем
-            # заново (UNIQUE posting_number), а только двигаем last_seen.
+            # заново (UNIQUE posting_number+product_label), а только двигаем
+            # last_seen. Тот же номер, но другой штрихкод — физически другой товар:
+            # existing не найдётся, создастся новая запись.
             existing_shipment = self.session.execute(
-                select(Shipment).where(Shipment.posting_number == posting_number)
+                select(Shipment).where(
+                    Shipment.posting_number == posting_number,
+                    Shipment.product_label == product_label,
+                )
             ).scalar_one_or_none()
 
             if row_data['is_kty']:

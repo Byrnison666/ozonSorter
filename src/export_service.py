@@ -59,22 +59,29 @@ class ExportService:
 
             # Column 2: номер отправления — первичный id посылки (в нём Ozon ID клиента)
             ws.cell(row=idx, column=2, value=shipment.posting_number).alignment = alignment
-            
-            # Column 3: cell
-            ws.cell(row=idx, column=3, value=shipment.cell).alignment = alignment
-            
-            # Column 4: Damaged mark
+
+            # Column 3: штрихкод (первая строка «Этикетка») — для физической сверки
+            # товара в ячейке. Одну ячейку переиспользуют под разные посылки того
+            # же клиента; по номеру их не отличить на месте, по штрихкоду — да.
+            # Показываем как есть; если это дубль номера отправления — так и выводим.
+            ws.cell(row=idx, column=3, value=shipment.product_label).alignment = alignment
+
+            # Column 4: cell
+            ws.cell(row=idx, column=4, value=shipment.cell).alignment = alignment
+
+            # Column 5: Damaged mark
             if shipment.is_damaged:
-                ws.cell(row=idx, column=4, value="ПОВРЕЖДЕНО").alignment = alignment
+                ws.cell(row=idx, column=5, value="ПОВРЕЖДЕНО").alignment = alignment
                 # Highlight row
-                for col in range(1, 5):
+                for col in range(1, 6):
                     ws.cell(row=idx, column=col).fill = damaged_fill
 
         # Column widths
         ws.column_dimensions['A'].width = 60
         ws.column_dimensions['B'].width = 22
-        ws.column_dimensions['C'].width = 18
-        ws.column_dimensions['D'].width = 14
+        ws.column_dimensions['C'].width = 20
+        ws.column_dimensions['D'].width = 18
+        ws.column_dimensions['E'].width = 14
         
         wb.save(output_path)
         

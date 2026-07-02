@@ -112,6 +112,14 @@ class ExcelParser:
             else:
                 row_data['product_label'] = None
                 row_data['product_name'] = None
+
+            # Штрихкод (первая строка «Этикетка») — часть составного ключа посылки.
+            # Пустой быть не должен: иначе NULL в UNIQUE(posting_number, product_label)
+            # считается «различным» и повторные строки плодят дубли. Вырожденный
+            # штрихкод = сам номер отправления. Настоящий дубль номера в этикетке
+            # («Показывать как есть») не трогаем — он и так непуст.
+            if not row_data.get('product_label'):
+                row_data['product_label'] = str(posting_number).strip()
                 
             row_data['is_damaged'] = 'Повреждено' in str(row_data.get('type', ''))
             

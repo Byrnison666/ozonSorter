@@ -74,7 +74,7 @@ class Shipment(Base):
     __tablename__ = "shipments"
     
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    posting_number: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    posting_number: Mapped[str] = mapped_column(String, nullable=False)
     client_id: Mapped[Optional[int]] = mapped_column(ForeignKey("clients.id"))
     ozon_client_id_raw: Mapped[str] = mapped_column(String, nullable=False)
     product_label: Mapped[Optional[str]] = mapped_column(String)
@@ -114,6 +114,13 @@ class Shipment(Base):
     )
 
     __table_args__ = (
+        # Посылку идентифицируем парой «номер отправления + штрихкод», а не одним
+        # номером. Ozon кладёт разные посылки одного клиента в одну ячейку и порой
+        # повторяет номер отправления для физически другого товара — по одному
+        # номеру они схлопывались в дубль. Штрихкод (первая строка «Этикетка»)
+        # различает физический товар. product_label всегда непуст (parser даёт
+        # fallback = номер отправления), иначе NULL в UNIQUE ловился бы как «разные».
+        UniqueConstraint("posting_number", "product_label", name="uq_posting_label"),
         Index("idx_shipments_assignment_status", "assignment_status"),
         Index("idx_shipments_assigned_point", "assigned_point"),
         Index("idx_shipments_ozon_client_id_raw", "ozon_client_id_raw"),
