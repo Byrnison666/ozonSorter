@@ -120,7 +120,22 @@ class ImportService:
 
             if existing_shipment:
                 self._touch(existing_shipment, import_session.id)
-                if not is_ready:
+                if existing_shipment.assignment_status == AssignmentStatus.EXCLUDED_NOT_OURS:
+                    # Клиента могли добавить уже после первой встречи посылки.
+                    # Повторный импорт должен переклассифицировать сохранённую
+                    # запись, иначе она навсегда останется «не нашей» и не
+                    # попадёт в экспорт даже при успешном матчинге клиента.
+                    existing_shipment.client_id = client.id
+                    existing_shipment.assigned_point = client.fixed_delivery_point
+                    existing_shipment.ozon_status = row_data.get('status')
+                    if is_ready:
+                        existing_shipment.assignment_status = AssignmentStatus.TO_SHIP
+                        existing_shipment.exported_import_session_id = None
+                        import_session.new_to_ship_rows += 1
+                    else:
+                        existing_shipment.assignment_status = AssignmentStatus.RETURNED
+                        import_session.returned_rows += 1
+                elif not is_ready:
                     # Возврат: снять с отгрузки. Уже привезённые/на точке не трогаем
                     # — их мы физически забрали раньше, склад их назад не заберёт.
                     if existing_shipment.assignment_status in (

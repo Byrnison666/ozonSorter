@@ -17,13 +17,13 @@ from src.models import Client, Shipment, DeliveryPoint, AssignmentStatus
 from src.services import ImportService
 
 
-def _make_report(postings):
+def _make_report(postings, status="Готов"):
     path = tempfile.mktemp(suffix=".xlsx")
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.append(["Этикетка\nНазвание", "Номер отправления", "Тип", "Статус", "Ячейка"])
     for p in postings:
-        ws.append([f"LBL\n{p}", p, "Обычный", "Готов", "A-01"])
+        ws.append([f"LBL\n{p}", p, "Обычный", status, "A-01"])
     wb.save(path)
     return path
 
@@ -51,8 +51,8 @@ class ImportDedupTest(unittest.TestCase):
             if os.path.exists(f):
                 os.remove(f)
 
-    def _import(self, postings):
-        path = _make_report(postings)
+    def _import(self, postings, status="Готов"):
+        path = _make_report(postings, status)
         self._files.append(path)
         return self.importer.process_import(path)
 
@@ -80,6 +80,57 @@ class ImportDedupTest(unittest.TestCase):
         # Тот же posting дважды в одном файле — частый случай в отчётах Ozon.
         self._import([posting, posting])
         self.assertEqual(self._count(posting), 1)
+
+    def test_not_ours_becomes_to_ship_after_client_is_created(self):
+        posting = "888888-0119-1"
+        self._import([posting], status="Готово к выдаче")
+
+        client_session = self.db.get_session()
+        try:
+            client_session.add(Client(
+                ozon_client_id="888888",
+                full_name="Новый клиент",
+                fixed_delivery_point=DeliveryPoint.KOLTSEVAYA_16,
+            ))
+            client_session.commit()
+        finally:
+            client_session.close()
+
+        current_import = self._import([posting], status="Готово к выдаче")
+        shipment = self.session.execute(
+            select(Shipment).where(Shipment.posting_number == posting)
+        ).scalar_one()
+
+        self.assertEqual(shipment.assignment_status, AssignmentStatus.TO_SHIP)
+        self.assertEqual(shipment.assigned_point, DeliveryPoint.KOLTSEVAYA_16)
+        self.assertIsNotNone(shipment.client_id)
+        self.assertEqual(current_import.matched_rows, 1)
+        self.assertEqual(current_import.new_to_ship_rows, 1)
+
+    def test_not_ours_becomes_returned_after_client_is_created(self):
+        posting = "777777-0119-1"
+        self._import([posting], status="Отправить на склад")
+
+        client_session = self.db.get_session()
+        try:
+            client_session.add(Client(
+                ozon_client_id="777777",
+                full_name="Новый клиент с возвратом",
+                fixed_delivery_point=DeliveryPoint.KOMSOMOLSKAYA_4,
+            ))
+            client_session.commit()
+        finally:
+            client_session.close()
+
+        current_import = self._import([posting], status="Отправить на склад")
+        shipment = self.session.execute(
+            select(Shipment).where(Shipment.posting_number == posting)
+        ).scalar_one()
+
+        self.assertEqual(shipment.assignment_status, AssignmentStatus.RETURNED)
+        self.assertIsNotNone(shipment.client_id)
+        self.assertEqual(current_import.returned_rows, 1)
+        self.assertEqual(current_import.new_to_ship_rows, 0)
 
 
 if __name__ == "__main__":
