@@ -3,7 +3,8 @@
 Только «Готово к выдаче» можно забрать → идёт в отгрузку (TO_SHIP).
 «Отправить на склад» / «Вернуть продавцу» — возврат: в отгрузку не идёт,
 а уже стоявшая к отгрузке посылка снимается (RETURNED) и пропадает из экспорта.
-Старый отчёт без колонки «Статус» — поведение прежнее (всё к отгрузке).
+В отчёте без колонки «Статус» ячейки «На проверку-*» считаются возвратами,
+остальные строки сохраняют прежнее поведение и идут к отгрузке.
 """
 import os
 import tempfile
@@ -19,18 +20,22 @@ from src.export_service import ExportService
 
 
 def _make_report(rows, with_status=True):
-    """rows: список (posting, status) или (posting,) для старого формата."""
+    """rows: список (posting, status[, cell]) или (posting[, cell])."""
     path = tempfile.mktemp(suffix=".xlsx")
     wb = openpyxl.Workbook()
     ws = wb.active
     if with_status:
         ws.append(["Этикетка\nНазвание", "Номер отправления", "Статус", "Ячейка"])
-        for posting, status in rows:
-            ws.append([f"LBL\n{posting}", posting, status, "A-01"])
+        for row in rows:
+            posting, status = row[:2]
+            cell = row[2] if len(row) > 2 else "A-01"
+            ws.append([f"LBL\n{posting}", posting, status, cell])
     else:
         ws.append(["Этикетка\nНазвание", "Номер отправления", "Ячейка"])
-        for (posting,) in rows:
-            ws.append([f"LBL\n{posting}", posting, "A-01"])
+        for row in rows:
+            posting = row[0]
+            cell = row[1] if len(row) > 1 else "A-01"
+            ws.append([f"LBL\n{posting}", posting, cell])
     wb.save(path)
     return path
 
@@ -123,6 +128,14 @@ class StatusReadyTest(unittest.TestCase):
         self.assertEqual(self._ship("111-0011-1").assignment_status,
                          AssignmentStatus.TO_SHIP)
         self.assertEqual(s.new_to_ship_rows, 1)
+
+    def test_review_cell_without_status_is_returned(self):
+        posting = "111-0012-1"
+        s = self._import([(posting, "На проверку-3")], with_status=False)
+        self.assertEqual(self._ship(posting).assignment_status,
+                         AssignmentStatus.RETURNED)
+        self.assertEqual(s.returned_rows, 1)
+        self.assertNotIn(posting, self._export_postings(s.id))
 
 
 if __name__ == "__main__":

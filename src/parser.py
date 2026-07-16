@@ -48,14 +48,16 @@ class ExcelParser:
         return s or '0'
 
     @staticmethod
-    def is_ready_for_pickup(status) -> bool:
+    def is_ready_for_pickup(status, cell=None) -> bool:
         """Готова ли посылка к выдаче со склада по колонке «Статус».
 
-        Старый формат отчёта без колонки «Статус» → считаем готовой, чтобы не
-        ломать обработку прежних файлов (status приходит None/пустым).
+        В новом формате колонка «Статус» отсутствует, а возвраты помещаются в
+        ячейки «На проверку-*». Остальные строки без статуса считаем готовыми,
+        сохраняя совместимость со старыми отчётами.
         """
         if status is None or str(status).strip() == '':
-            return True
+            normalized_cell = str(cell or '').strip().lower()
+            return not normalized_cell.startswith('на проверку')
         return str(status).strip().lower() == ExcelParser.READY_STATUS.lower()
 
     @staticmethod

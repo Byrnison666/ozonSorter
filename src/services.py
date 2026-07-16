@@ -116,7 +116,9 @@ class ImportService:
                 continue
 
             import_session.matched_rows += 1
-            is_ready = self.parser.is_ready_for_pickup(row_data.get('status'))
+            is_ready = self.parser.is_ready_for_pickup(
+                row_data.get('status'), row_data.get('cell')
+            )
 
             if existing_shipment:
                 self._touch(existing_shipment, import_session.id)
