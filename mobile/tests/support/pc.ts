@@ -13,7 +13,12 @@ const PYTHON = join(REPO_ROOT, '.venv/bin/python');
 export function runPython(code: string, ...argv: string[]): string {
   const proc = Bun.spawnSync([PYTHON, '-c', code, ...argv], {
     cwd: REPO_ROOT,
-    env: { ...process.env, QT_QPA_PLATFORM: 'offscreen' },
+    // bun test сам работает в UTC; Python должен считать местное время так же.
+    env: {
+      ...process.env,
+      QT_QPA_PLATFORM: 'offscreen',
+      TZ: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    },
   });
   if (proc.exitCode !== 0) {
     throw new Error(`python failed (${proc.exitCode}):\n${proc.stderr.toString()}`);
