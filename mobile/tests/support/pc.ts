@@ -21,6 +21,17 @@ export function runPython(code: string, ...argv: string[]): string {
   return proc.stdout.toString();
 }
 
+/** Запустить скрипт из tests/py (импорты src.* — из корня репозитория). */
+export function runPythonScript(name: string, ...argv: string[]): string {
+  return runPython(
+    'import runpy, sys\n' +
+      "sys.argv = sys.argv[1:]\n" +
+      "runpy.run_path(sys.argv[0], run_name='__main__')\n",
+    join(import.meta.dir, '../py', name),
+    ...argv,
+  );
+}
+
 /** Создать базу так, как её создаёт программа на ПК при первом запуске. */
 export function createPcDatabase(path: string): void {
   runPython(
