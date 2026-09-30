@@ -89,6 +89,19 @@ QLabel#brandSub {{
     letter-spacing: 0.6px;
 }}
 
+QLabel#syncStatus {{
+    color: {Colors.SIDEBAR_TEXT};
+    font-size: 11px;
+    padding: 0 22px 10px 22px;
+}}
+
+QLabel#syncStatusDirty {{
+    color: #FBBF24;
+    font-size: 11px;
+    font-weight: 700;
+    padding: 0 22px 10px 22px;
+}}
+
 QLabel#navGroup {{
     color: {Colors.SIDEBAR_GROUP};
     font-size: 10px;

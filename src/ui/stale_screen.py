@@ -1,3 +1,4 @@
+import html
 from datetime import date, datetime
 
 from PySide2.QtCore import Qt
@@ -86,6 +87,9 @@ class StaleScreen(QWidget):
         info_row.setSpacing(10)
         self.import_info_label = QLabel("")
         self.import_info_label.setObjectName("subtitle")
+        # Имя файла берётся из базы, которая могла прийти с Яндекс.Диска: как
+        # HTML его показывать нельзя (<img src="file://…"> Qt открыл бы сам).
+        self.import_info_label.setTextFormat(Qt.PlainText)
         info_row.addWidget(self.import_info_label)
         self.outdated_badge = make_badge(
             "отчёт не сегодняшний — загрузите свежий", "warning"
@@ -240,13 +244,15 @@ class StaleScreen(QWidget):
         self.table.setRowCount(0)
         self.table.setRowCount(len(rows))
         for r, row in enumerate(rows):
-            tooltip = (
+            tooltip_text = (
                 f"Товар: {row.product_name or '—'}\n"
                 f"Клиент: {row.client_name or '—'} (Ozon ID {row.ozon_client_id})\n"
                 f"Телефон: {row.phone or '—'}\n"
                 f"Штрихкод: {row.product_label}\n"
                 f"Впервые в отчёте: {row.first_seen_label}"
             )
+            # Подсказка рисуется как HTML, если похожа на него; значения — из базы.
+            tooltip = "<p style='white-space:pre'>" + html.escape(tooltip_text) + "</p>"
 
             days_item = QTableWidgetItem()
             # Число, а не строка — чтобы сортировка по заголовку была числовой.

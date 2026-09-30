@@ -14,6 +14,16 @@ def natural_key(text: str) -> List:
     return [int(c) if c.isdigit() else c.lower() for c in re.split(r'(\d+)', text)]
 
 
+def text_cell(ws, row: int, column: int, value):
+    """Записать значение в ячейку. Строки всегда идут как текст: openpyxl иначе
+    превращает строку, начинающуюся с «=», в формулу, а значения берутся из базы,
+    которая могла прийти с Яндекс.Диска."""
+    cell = ws.cell(row=row, column=column, value=value)
+    if isinstance(value, str):
+        cell.data_type = "s"
+    return cell
+
+
 class ExportService:
     def __init__(self, db_session: Session):
         self.session = db_session
@@ -62,19 +72,19 @@ class ExportService:
                 or shipment.product_label
                 or shipment.posting_number
             )
-            ws.cell(row=idx, column=1, value=description).alignment = alignment
+            text_cell(ws, idx, 1, description).alignment = alignment
 
             # Column 2: номер отправления — первичный id посылки (в нём Ozon ID клиента)
-            ws.cell(row=idx, column=2, value=shipment.posting_number).alignment = alignment
+            text_cell(ws, idx, 2, shipment.posting_number).alignment = alignment
 
             # Column 3: штрихкод (первая строка «Этикетка») — для физической сверки
             # товара в ячейке. Одну ячейку переиспользуют под разные посылки того
             # же клиента; по номеру их не отличить на месте, по штрихкоду — да.
             # Показываем как есть; если это дубль номера отправления — так и выводим.
-            ws.cell(row=idx, column=3, value=shipment.product_label).alignment = alignment
+            text_cell(ws, idx, 3, shipment.product_label).alignment = alignment
 
             # Column 4: cell
-            ws.cell(row=idx, column=4, value=shipment.cell).alignment = alignment
+            text_cell(ws, idx, 4, shipment.cell).alignment = alignment
 
             # Column 5: Damaged mark
             if shipment.is_damaged:

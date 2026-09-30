@@ -11,6 +11,8 @@ from src.models import Client, DeliveryPoint
 from src.client_import_service import ClientImportService
 from src.parser import ExcelParser
 
+from .sync_flow import ask_yes_no
+
 
 class ClientsScreen(QWidget):
     def __init__(self, db_manager, main_window):
@@ -133,6 +135,7 @@ class ClientsScreen(QWidget):
         if not self._validate(data):
             return
 
+        changed = False
         session = self.db_manager.get_session()
         try:
             # Сравнение по нормализованному id: «0224…» и «224…» — один клиент.
@@ -157,11 +160,14 @@ class ClientsScreen(QWidget):
             ))
             session.commit()
             self.refresh_table()
+            changed = True
         except Exception as e:
             session.rollback()
             QMessageBox.critical(self, "Ошибка", f"Не удалось добавить клиента:\n{e}")
         finally:
             session.close()
+        if changed:
+            self.main_window.on_data_changed()
 
     def on_edit_client(self):
         client_id = self._selected_client_id()
@@ -169,6 +175,7 @@ class ClientsScreen(QWidget):
             QMessageBox.information(self, "Нет выбора", "Выберите клиента в списке.")
             return
 
+        changed = False
         session = self.db_manager.get_session()
         try:
             client = session.get(Client, client_id)
@@ -209,11 +216,14 @@ class ClientsScreen(QWidget):
             client.fixed_delivery_point = DeliveryPoint(data['point'])
             session.commit()
             self.refresh_table()
+            changed = True
         except Exception as e:
             session.rollback()
             QMessageBox.critical(self, "Ошибка", f"Не удалось изменить клиента:\n{e}")
         finally:
             session.close()
+        if changed:
+            self.main_window.on_data_changed()
 
     def on_delete_client(self):
         client_id = self._selected_client_id()
@@ -221,27 +231,31 @@ class ClientsScreen(QWidget):
             QMessageBox.information(self, "Нет выбора", "Выберите клиента в списке.")
             return
 
+        changed = False
         session = self.db_manager.get_session()
         try:
             client = session.get(Client, client_id)
             if client is None:
                 return
             name = client.full_name or client.ozon_client_id
-            if QMessageBox.question(
+            if not ask_yes_no(
                 self, "Удалить клиента",
                 f"Удалить клиента «{name}» из списка?\n"
                 f"История его посылок сохранится, новые перестанут к нему относиться.",
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.No
-            ) != QMessageBox.Yes:
+                default_yes=False,
+            ):
                 return
             client.is_active = False
             session.commit()
             self.refresh_table()
+            changed = True
         except Exception as e:
             session.rollback()
             QMessageBox.critical(self, "Ошибка", f"Не удалось удалить клиента:\n{e}")
         finally:
             session.close()
+        if changed:
+            self.main_window.on_data_changed()
 
     def _validate(self, data) -> bool:
         if not data['ozon_client_id'].isdigit():
@@ -304,6 +318,8 @@ class ClientsScreen(QWidget):
             QMessageBox.warning(self, "Импорт завершён с ошибками", msg)
         else:
             QMessageBox.information(self, "Импорт завершён", msg)
+        if result.added or result.updated:
+            self.main_window.on_data_changed()
 
 
 class ClientDialog(QDialog):

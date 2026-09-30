@@ -1,5 +1,6 @@
 import sys
 
+from PySide2.QtCore import QTimer
 from PySide2.QtGui import QFont
 from PySide2.QtWidgets import QApplication
 
@@ -31,6 +32,8 @@ def main():
 
     window = MainWindow(db_manager)
     window.show()
+    # После показа окна: проверка может спросить о загрузке базы с Диска.
+    QTimer.singleShot(0, window.startup_sync)
 
     sys.exit(app.exec_())
 

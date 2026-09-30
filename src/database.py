@@ -1,5 +1,5 @@
 import os
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import sessionmaker, Session
 from .models import Base
 from .parser import ExcelParser
@@ -7,6 +7,11 @@ from .parser import ExcelParser
 # Default DB path in AppData if not specified
 APP_DATA_DIR = os.path.join(os.environ.get('APPDATA', os.path.expanduser('~')), 'OzonSorter')
 DEFAULT_DB_PATH = os.path.join(APP_DATA_DIR, 'ozon_sorter.db')
+
+# Версия схемы, хранится в PRAGMA user_version. Поднимать при каждом изменении
+# схемы: по ней устройства при синхронизации отказываются открывать базу,
+# созданную более новой версией программы.
+SCHEMA_VERSION = 1
 
 class DatabaseManager:
     def __init__(self, db_path: str = DEFAULT_DB_PATH):
@@ -16,6 +21,12 @@ class DatabaseManager:
             os.makedirs(db_dir)
             
         self.engine = create_engine(f"sqlite:///{self.db_path}")
+
+        @event.listens_for(self.engine, "connect")
+        def _restrict_schema(dbapi_connection, _record):
+            # Файл базы может прийти с Яндекс.Диска: запрещаем его схеме (CHECK,
+            # DEFAULT, триггеры) вызывать что-либо кроме безобидных функций SQL.
+            dbapi_connection.execute("PRAGMA trusted_schema = OFF")
         self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=self.engine)
 
     def create_tables(self):
@@ -67,8 +78,8 @@ class DatabaseManager:
                 idx_name, is_unique = idx[1], idx[2]
                 if not is_unique:
                     continue
-                idx_cols = [r[2] for r in conn.execute(
-                    text(f"PRAGMA index_info('{idx_name}')")
+                idx_cols = [r[0] for r in conn.execute(
+                    text("SELECT name FROM pragma_index_info(:n)"), {"n": idx_name}
                 )]
                 if idx_cols == ["posting_number"]:
                     needs_rebuild = True
@@ -209,6 +220,11 @@ class DatabaseManager:
                         text("UPDATE clients SET ozon_client_id = :n WHERE id = :i"),
                         {"n": norm, "i": survivor_id},
                     )
+
+            # Пишем только когда версия ниже: лишняя запись меняла бы файл базы при
+            # каждом запуске, а синхронизация считала бы это локальной правкой.
+            if conn.execute(text("PRAGMA user_version")).scalar() < SCHEMA_VERSION:
+                conn.execute(text(f"PRAGMA user_version = {SCHEMA_VERSION}"))
 
     def get_session(self) -> Session:
         return self.SessionLocal()

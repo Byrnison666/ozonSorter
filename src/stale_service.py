@@ -6,7 +6,7 @@ from sqlalchemy import select
 import openpyxl
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
-from .export_service import natural_key
+from .export_service import natural_key, text_cell
 from .models import (
     Client, Shipment, ImportSession, AssignmentStatus, DeliveryPoint
 )
@@ -147,7 +147,7 @@ class StaleShipmentService:
             else:
                 fill = None
             for col, value in enumerate(row.as_cells(), 1):
-                cell = ws.cell(row=idx, column=col, value=value)
+                cell = text_cell(ws, idx, col, value)
                 cell.alignment = alignment
                 if fill is not None:
                     cell.fill = fill

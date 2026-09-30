@@ -10,6 +10,7 @@ from src.export_service import ExportService
 from src.models import DeliveryPoint
 from src.services import ImportService
 
+from .sync_flow import ask_yes_no
 from .theme import make_stat_tile
 
 
@@ -158,12 +159,12 @@ class DashboardScreen(QWidget):
         dup = self.import_service.find_duplicate_import(file_path)
         if dup is not None:
             when = dup.started_at.strftime("%d.%m.%Y %H:%M") if dup.started_at else "?"
-            if QMessageBox.question(
+            if not ask_yes_no(
                 self, "Файл уже загружали",
                 f"Этот файл уже импортировали {when} («{dup.source_file_name}»).\n"
                 f"Загрузить повторно?",
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.No
-            ) != QMessageBox.Yes:
+                default_yes=False,
+            ):
                 return
 
         try:
@@ -190,6 +191,10 @@ class DashboardScreen(QWidget):
         except Exception as e:
             QMessageBox.critical(self, "Ошибка импорта",
                                  f"Не удалось импортировать файл:\n{e}")
+            return
+        # Последним действием: синхронизация может заменить базу и пересоздать
+        # этот экран.
+        self.main_window.on_data_changed()
 
     def on_export(self, point):
         if not self.last_import_session_id:
@@ -216,3 +221,11 @@ class DashboardScreen(QWidget):
         except Exception as e:
             QMessageBox.critical(self, "Ошибка экспорта",
                                  f"Не удалось сохранить файл:\n{e}")
+            return
+        # Выгрузка помечает посылки как выгруженные — это тоже изменение базы.
+        self.main_window.on_data_changed()
+
+    def release(self):
+        """Закрыть долгоживущие сессии: файл базы сейчас будут читать или заменять."""
+        self.import_service.session.close()
+        self.export_service.session.close()
