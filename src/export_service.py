@@ -1,4 +1,5 @@
 import os
+import re
 from datetime import datetime
 from typing import List
 from sqlalchemy.orm import Session
@@ -6,6 +7,12 @@ from sqlalchemy import select, or_
 import openpyxl
 from openpyxl.styles import PatternFill, Alignment, Border, Side
 from .models import Shipment, AssignmentStatus, DeliveryPoint, ExportSession, ImportSession
+
+
+def natural_key(text: str) -> List:
+    """Ключ натуральной сортировки ячеек: «A-2» раньше «A-10»."""
+    return [int(c) if c.isdigit() else c.lower() for c in re.split(r'(\d+)', text)]
+
 
 class ExportService:
     def __init__(self, db_session: Session):
@@ -36,7 +43,7 @@ class ExportService:
         shipments = self.session.execute(stmt).scalars().all()
         
         # Natural sort by cell
-        shipments.sort(key=lambda s: self._natural_key(s.cell or ""))
+        shipments.sort(key=lambda s: natural_key(s.cell or ""))
         
         wb = openpyxl.Workbook()
         ws = wb.active
@@ -99,7 +106,3 @@ class ExportService:
         self.session.add(export_session)
         self.session.commit()
         return export_session
-
-    def _natural_key(self, text: str) -> List:
-        import re
-        return [int(c) if c.isdigit() else c.lower() for c in re.split(r'(\d+)', text)]

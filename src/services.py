@@ -99,7 +99,7 @@ class ImportService:
             if row_data['is_kty']:
                 import_session.kty_rows += 1
                 if existing_shipment:
-                    self._touch(existing_shipment, import_session.id)
+                    self._touch(existing_shipment, import_session.id, row_data)
                 else:
                     self._create_shipment(row_data, import_session.id, AssignmentStatus.EXCLUDED_KTY)
                 continue
@@ -110,7 +110,7 @@ class ImportService:
             if not client:
                 import_session.not_ours_rows += 1
                 if existing_shipment:
-                    self._touch(existing_shipment, import_session.id)
+                    self._touch(existing_shipment, import_session.id, row_data)
                 else:
                     self._create_shipment(row_data, import_session.id, AssignmentStatus.EXCLUDED_NOT_OURS)
                 continue
@@ -121,7 +121,7 @@ class ImportService:
             )
 
             if existing_shipment:
-                self._touch(existing_shipment, import_session.id)
+                self._touch(existing_shipment, import_session.id, row_data)
                 if existing_shipment.assignment_status == AssignmentStatus.EXCLUDED_NOT_OURS:
                     # Клиента могли добавить уже после первой встречи посылки.
                     # Повторный импорт должен переклассифицировать сохранённую
@@ -193,10 +193,15 @@ class ImportService:
         self.session.commit()
         return import_session
 
-    def _touch(self, shipment: Shipment, session_id: int):
+    def _touch(self, shipment: Shipment, session_id: int, row_data: Dict[str, Any]):
         """Отметить, что посылка встречена в текущем импорте (без смены статуса)."""
         shipment.last_seen_at = datetime.now()
         shipment.last_seen_import_session_id = session_id
+        # Склад мог переложить посылку в другую ячейку — берём актуальную из отчёта.
+        # Пустое (в т.ч. из одних пробелов) значение не затирает известную ячейку.
+        cell = row_data.get('cell')
+        if cell is not None and str(cell).strip():
+            shipment.cell = cell
 
     def _create_shipment(self, row_data: Dict[str, Any], session_id: int, status: AssignmentStatus, client_id: Optional[int] = None, assigned_point: Optional[DeliveryPoint] = None):
         shipment = Shipment(
