@@ -5,6 +5,7 @@
 """
 import socket
 from dataclasses import dataclass
+from datetime import datetime
 from enum import Enum
 from typing import Optional
 
@@ -15,7 +16,7 @@ from PySide2.QtWidgets import (
 
 from src.sync_config import STATE_PATH, SyncConfig
 from src.sync_service import (
-    CancelToken, SyncCancelled, SyncError, SyncService, SyncStatus,
+    SAVED_AT_FORMAT, CancelToken, SyncCancelled, SyncError, SyncService, SyncStatus,
 )
 from src.webdav import WebDavClient, WebDavError
 
@@ -226,8 +227,16 @@ def run_with_progress(parent, text, fn):
     return result
 
 
+def _format_time(value: str) -> str:
+    """'2026-09-30 14:05:00' → '30.09.2026 14:05'; пустое или чужой формат — '—'."""
+    try:
+        return datetime.strptime(value, SAVED_AT_FORMAT).strftime("%d.%m.%Y %H:%M")
+    except ValueError:
+        return "—"
+
+
 def _describe_remote(meta) -> str:
-    return f"устройство «{meta.device or '—'}», сохранена {meta.saved_at or '—'}"
+    return f"устройство «{meta.device or '—'}», сохранена {_format_time(meta.saved_at)}"
 
 
 def _ask_conflict(parent, check) -> str:
@@ -237,7 +246,9 @@ def _ask_conflict(parent, check) -> str:
              if check.remote_is_older else "")
     box = message_box(
         parent, QMessageBox.Warning, "Изменения с двух сторон",
-        "База изменена и на этом компьютере, и на Яндекс.Диске.\n"
+        "База изменена и на этом компьютере, и на Яндекс.Диске.\n\n"
+        "Версия этого компьютера: последняя синхронизация "
+        f"{_format_time(check.local_synced_at)}, после неё есть изменения.\n"
         f"Версия на Диске: {_describe_remote(check.meta)}.\n{older}\n"
         "Объединить их программа не может. Какую версию оставить?\n\n"
         "«Оставить эту» — база этого компьютера станет текущей на Диске; версия с "

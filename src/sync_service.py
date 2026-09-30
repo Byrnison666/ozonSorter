@@ -41,7 +41,7 @@ _MAX_REV = 999_998
 # файлы друг друга, и meta.json всегда указывает на файл со своим содержимым.
 _REVISION_RE = re.compile(r"ozon_sorter_rev(\d{6})_([0-9a-f]{8})\.db\.gz", re.ASCII)
 _SHA256_RE = re.compile(r"[0-9a-f]{64}", re.ASCII)
-_SAVED_AT_FORMAT = "%Y-%m-%d %H:%M:%S"
+SAVED_AT_FORMAT = "%Y-%m-%d %H:%M:%S"
 # Объекты, которые программа создаёт сама. Всё остальное в базе с Диска —
 # постороннее: триггер или представление исполнялись бы внутри программы.
 # Таблицы берутся из моделей, чтобы новая таблица не отвергалась при синхронизации.
@@ -110,6 +110,8 @@ class SyncCheck:
     # Диск не продолжает ту версию, с которой работал этот компьютер: номер ревизии
     # меньше уже виденного либо та же ревизия заменена другой базой.
     remote_is_older: bool = False
+    # Когда это устройство последний раз обменялось базой с Диском; "" — неизвестно.
+    local_synced_at: str = ""
 
 
 def _replace_file(src: str, dst: str, attempts: int = 10, delay: float = 0.3) -> None:
@@ -152,12 +154,18 @@ def _parse_meta(raw: bytes) -> RemoteMeta:
     device = "".join(
         ch for ch in str(data.get("device", "")) if ch.isprintable() and ch not in "<>&"
     )[:64]
-    saved_at = str(data.get("saved_at", ""))
+    saved_at = data.get("saved_at", "")
+    return RemoteMeta(rev, file, sha, schema_version, device, _valid_time(saved_at))
+
+
+def _valid_time(value) -> str:
+    """Время в формате SAVED_AT_FORMAT либо "" — строка показывается в диалогах."""
+    value = str(value)
     try:
-        datetime.strptime(saved_at, _SAVED_AT_FORMAT)
+        datetime.strptime(value, SAVED_AT_FORMAT)
     except ValueError:
-        saved_at = ""
-    return RemoteMeta(rev, file, sha, schema_version, device, saved_at)
+        return ""
+    return value
 
 
 def _validate_database(path: str) -> None:
@@ -202,24 +210,30 @@ class SyncService:
     # --- состояние ---
 
     def _load_state(self) -> dict:
-        empty = {"base_rev": 0, "base_sha256": ""}
+        empty = {"base_rev": 0, "base_sha256": "", "synced_at": ""}
         try:
             with open(self.state_path, "r", encoding="utf-8") as f:
                 state = json.load(f)
             if state.get("target", "") != self.target_id:
                 return empty
-            return {"base_rev": int(state["base_rev"]), "base_sha256": str(state["base_sha256"])}
+            return {"base_rev": int(state["base_rev"]), "base_sha256": str(state["base_sha256"]),
+                    # В файлах, записанных до появления поля, его нет.
+                    "synced_at": _valid_time(state.get("synced_at", ""))}
         except (OSError, ValueError, KeyError, TypeError, AttributeError):
             # Файла нет или он повреждён — считаем, что ещё не синхронизировались.
             return empty
 
-    def _save_state(self, rev: int, sha256: str) -> None:
+    def _save_state(self, rev: int, sha256: str, synced_at: Optional[str] = None) -> None:
+        """synced_at — время обмена; по умолчанию текущее."""
+        if synced_at is None:
+            synced_at = datetime.now().strftime(SAVED_AT_FORMAT)
         # Имя временного файла уникально: проверка при запуске и ручная
         # синхронизация могут работать одновременно.
         tmp = f"{self.state_path}.{os.getpid()}.{threading.get_ident()}.tmp"
         try:
             with open(tmp, "w", encoding="utf-8") as f:
-                json.dump({"base_rev": rev, "base_sha256": sha256, "target": self.target_id}, f)
+                json.dump({"base_rev": rev, "base_sha256": sha256, "synced_at": synced_at,
+                           "target": self.target_id}, f)
                 f.flush()
                 os.fsync(f.fileno())
             _replace_file(tmp, self.state_path)
@@ -320,7 +334,7 @@ class SyncService:
             state["base_rev"] > 0 and meta.rev == state["base_rev"]
             and meta.sha256 != state["base_sha256"]
         )
-        return SyncCheck(status, meta, remote_is_older=rewound)
+        return SyncCheck(status, meta, remote_is_older=rewound, local_synced_at=state["synced_at"])
 
     def push(self, expected: Optional[RemoteMeta], token: Optional[CancelToken] = None) -> int:
         """Выложить локальную базу новой ревизией. Возвращает номер ревизии.
@@ -360,7 +374,7 @@ class SyncService:
         new_meta = {
             "rev": rev, "file": name, "sha256": sha, "schema_version": schema_version,
             "device": self.device_name,
-            "saved_at": datetime.now().strftime(_SAVED_AT_FORMAT),
+            "saved_at": datetime.now().strftime(SAVED_AT_FORMAT),
         }
         self.client.put(f"{self.remote_dir}/{META_NAME}",
                         json.dumps(new_meta, ensure_ascii=False).encode("utf-8"))
@@ -443,7 +457,7 @@ class SyncService:
                     os.remove(tmp)
         # Только после успешной замены: при сбое откат можно повторить.
         self._rollback = None
-        self._save_state(state["base_rev"], state["base_sha256"])
+        self._save_state(state["base_rev"], state["base_sha256"], state["synced_at"])
 
     @staticmethod
     def _unpack(packed: bytes) -> bytes:

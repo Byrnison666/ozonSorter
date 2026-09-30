@@ -15,6 +15,7 @@ import shutil
 import sqlite3
 import tempfile
 import unittest
+from datetime import datetime
 from unittest import mock
 
 from sqlalchemy import select
@@ -568,6 +569,60 @@ class StateAndRevisionTest(SyncServiceTestBase):
             self.a.push()
         self.assertEqual(calls["n"], 2)
         self.assertFalse(self.a.sync.local_changed())
+
+    # --- время последней синхронизации ---
+
+    def _state(self, device):
+        with open(device.sync.state_path, encoding="utf-8") as f:
+            return json.load(f)
+
+    def _set_synced_at(self, device, value):
+        state = self._state(device)
+        if value is None:
+            state.pop("synced_at", None)
+        else:
+            state["synced_at"] = value
+        with open(device.sync.state_path, "w", encoding="utf-8") as f:
+            json.dump(state, f)
+
+    def _assert_recent(self, value):
+        moment = datetime.strptime(value, sync_service.SAVED_AT_FORMAT)
+        self.assertLess(abs((datetime.now() - moment).total_seconds()), 60)
+
+    def test_push_and_pull_record_sync_time(self):
+        self._seed()
+        self._assert_recent(self._state(self.a)["synced_at"])
+        self._assert_recent(self._state(self.b)["synced_at"])
+
+    def test_conflict_reports_time_of_last_local_sync(self):
+        self._seed()
+        self._set_synced_at(self.b, "2026-09-29 08:15:00")
+        self.a.add_client("222")
+        self.a.push()
+        self.b.add_client("333")
+        check = self.b.sync.check()
+        self.assertEqual(check.status, SyncStatus.CONFLICT)
+        self.assertEqual(check.local_synced_at, "2026-09-29 08:15:00")
+
+    def test_missing_or_malformed_sync_time_is_unknown(self):
+        self._seed()
+        self.a.add_client("222")
+        self.a.push()
+        self.b.add_client("333")
+        for value in (None, "<b>вчера</b>", 12345):
+            self._set_synced_at(self.b, value)
+            check = self.b.sync.check()
+            self.assertEqual(check.status, SyncStatus.CONFLICT)   # состояние читается
+            self.assertEqual(check.local_synced_at, "")
+
+    def test_rollback_restores_previous_sync_time(self):
+        self._seed()
+        self._set_synced_at(self.b, "2026-09-29 08:15:00")
+        self.a.add_client("222")
+        self.a.push()
+        self.b.pull()
+        self.b.sync.rollback_pull()
+        self.assertEqual(self._state(self.b)["synced_at"], "2026-09-29 08:15:00")
 
 
 class HostileRemoteTest(SyncServiceTestBase):

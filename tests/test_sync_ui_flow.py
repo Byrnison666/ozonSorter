@@ -810,6 +810,7 @@ class RealDialogsTest(SyncUiTestCase):
             default, escape = box.defaultButton(), box.escapeButton()
             seen["default"] = default.text() if default else None
             seen["escape"] = escape.text() if escape else None
+            seen["text"] = box.text()
             for button in box.buttons():
                 if button.text() == click:
                     button.click()
@@ -827,6 +828,17 @@ class RealDialogsTest(SyncUiTestCase):
             self.assertEqual(result, expected)
         self.assertEqual(seen["default"], "Отмена")      # Enter ничего не перезаписывает
         self.assertEqual(seen["escape"], "Отмена")
+
+    def test_conflict_shows_sync_time_of_both_versions(self):
+        check = SyncCheck(SyncStatus.CONFLICT, self.META, local_synced_at="2026-09-29 08:15:00")
+        _, seen = self._ask(REAL_ASK_CONFLICT, "Отмена", check)
+        self.assertIn("последняя синхронизация 29.09.2026 08:15", seen["text"])
+        self.assertIn("«Телефон», сохранена 30.09.2026 10:00", seen["text"])
+
+    def test_conflict_with_unknown_local_sync_time(self):
+        check = SyncCheck(SyncStatus.CONFLICT, self.META)
+        _, seen = self._ask(REAL_ASK_CONFLICT, "Отмена", check)
+        self.assertIn("последняя синхронизация —", seen["text"])
 
     def test_pull_question_default_is_no_when_disk_version_is_older(self):
         older = SyncCheck(SyncStatus.REMOTE_AHEAD, self.META, remote_is_older=True)
