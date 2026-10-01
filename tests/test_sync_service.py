@@ -24,8 +24,8 @@ from src import sync_service
 from src.database import DatabaseManager, SCHEMA_VERSION
 from src.models import Client, DeliveryPoint
 from src.sync_service import (
-    CancelToken, KEEP_REMOTE_REVISIONS, META_NAME, SyncCancelled, SyncError,
-    SyncService, SyncStatus,
+    BACKUP_DIR, CancelToken, KEEP_DAILY_BACKUPS, KEEP_REMOTE_REVISIONS, META_NAME,
+    SyncCancelled, SyncError, SyncService, SyncStatus,
 )
 from src.webdav import WebDavClient, WebDavError
 from webdav_fake import FakeWebDavServer
@@ -130,7 +130,7 @@ class SyncServiceTestBase(unittest.TestCase):
         return json.loads(self.server.files[META_PATH].decode("utf-8"))
 
     def _revision_files(self):
-        return sorted(p for p in self.server.files if p.endswith(".db.gz"))
+        return sorted(p for p in self.server.files if p.startswith(f"/{REMOTE_DIR}/ozon_sorter_rev"))
 
     def _seed(self):
         """A выложил базу с клиентом 111, B её скачал: обе стороны на одной ревизии."""
@@ -623,6 +623,110 @@ class StateAndRevisionTest(SyncServiceTestBase):
         self.b.pull()
         self.b.sync.rollback_pull()
         self.assertEqual(self._state(self.b)["synced_at"], "2026-09-29 08:15:00")
+
+
+class DataLossProtectionTest(SyncServiceTestBase):
+    """База на Диске не должна стереться по ошибке: пустой базой, базой
+    устройства, ни разу не загружавшего Диск, или цепочкой выгрузок."""
+
+    BACKUP_PREFIX = f"/{REMOTE_DIR}/{BACKUP_DIR}/"
+
+    def _today_backup(self):
+        return f"{self.BACKUP_PREFIX}ozon_sorter_{datetime.now().strftime('%Y-%m-%d')}.db.gz"
+
+    def _backups(self):
+        return sorted(p for p in self.server.files if p.startswith(self.BACKUP_PREFIX))
+
+    def test_empty_base_is_never_pushed_over_disk(self):
+        self.a.add_client("111")
+        self.a.push()
+        meta_before = self.server.files[META_PATH]
+        for prepare in (lambda: None, lambda: os.remove(self.b.db_path)):
+            prepare()
+            if not os.path.exists(self.b.db_path):
+                self.b.open_and_close()
+            with self.assertRaises(SyncError) as ctx:
+                self.b.sync.push(self.b.sync.check().meta)
+            self.assertIn("пустая база", str(ctx.exception))
+        self.assertEqual(self.server.files[META_PATH], meta_before)
+
+    def test_never_synced_device_cannot_replace_disk_base(self):
+        self.a.add_client("111")
+        self.a.push()
+        self.b.add_client("999")                       # работал с нуля, Диск не загружал
+        check = self.b.sync.check()
+        self.assertEqual(check.status, SyncStatus.CONFLICT)
+        self.assertTrue(check.never_synced)
+        meta_before = self.server.files[META_PATH]
+        with self.assertRaises(SyncError) as ctx:
+            self.b.sync.push(check.meta)
+        self.assertIn("ни разу не загружало", str(ctx.exception))
+        self.assertEqual(self.server.files[META_PATH], meta_before)
+        self.b.pull()                                  # «Взять с Диска» по-прежнему можно
+        self.assertEqual(self.b.client_ids(), ["111"])
+
+    def test_synced_device_keeps_conflict_choice(self):
+        self._seed()
+        self.a.add_client("222")
+        self.a.push()
+        self.b.add_client("333")
+        check = self.b.sync.check()
+        self.assertFalse(check.never_synced)
+        self.assertEqual(self.b.sync.push(check.meta), 3)
+
+    def test_first_push_to_empty_disk_is_allowed(self):
+        self.a.add_client("111")
+        self.assertEqual(self.a.push(), 1)
+
+    def test_daily_backup_made_once_per_day(self):
+        self.a.add_client("111")
+        self.a.push()
+        first = self.server.files[self._today_backup()]
+        with open(self.a.db_path, "rb") as f:
+            self.assertEqual(gzip.decompress(first), f.read())
+        self.a.add_client("222")
+        self.a.push()
+        self.assertEqual(self.server.files[self._today_backup()], first)  # не перезаписана
+        self.assertEqual(self._backups(), [self._today_backup()])
+
+    def test_revision_pruning_keeps_daily_backups(self):
+        old = f"{self.BACKUP_PREFIX}ozon_sorter_2026-01-01.db.gz"
+        self.server.dirs.update({f"/{REMOTE_DIR}", f"/{REMOTE_DIR}/{BACKUP_DIR}"})
+        self.server.files[old] = b"old"
+        for i in range(KEEP_REMOTE_REVISIONS + 3):
+            self.a.add_client(str(1000 + i))
+            self.a.push()
+        self.assertIn(old, self.server.files)
+        self.assertIn(self._today_backup(), self.server.files)
+
+    def test_daily_backups_limited_and_foreign_files_kept(self):
+        self.server.dirs.update({f"/{REMOTE_DIR}", f"/{REMOTE_DIR}/{BACKUP_DIR}"})
+        # 35 старых копий: 31 за январь и 4 за февраль.
+        for month, days in ((1, 31), (2, 4)):
+            for day in range(1, days + 1):
+                self.server.files[f"{self.BACKUP_PREFIX}ozon_sorter_2026-{month:02d}-{day:02d}.db.gz"] = b"x"
+        foreign = f"{self.BACKUP_PREFIX}заметки.txt"
+        self.server.files[foreign] = b"keep"
+        self.a.add_client("111")
+        self.a.push()
+        dated = [p for p in self._backups() if p.endswith(".db.gz")]
+        self.assertEqual(len(dated), KEEP_DAILY_BACKUPS)
+        self.assertIn(self._today_backup(), dated)
+        self.assertNotIn(f"{self.BACKUP_PREFIX}ozon_sorter_2026-01-01.db.gz", dated)
+        self.assertIn(foreign, self.server.files)
+
+    def test_backup_failure_does_not_fail_push(self):
+        self.a.add_client("111")
+        real = self.a.sync.client.list_dir
+
+        def broken(path):
+            if BACKUP_DIR in path:
+                raise WebDavError("boom")
+            return real(path)
+
+        with mock.patch.object(self.a.sync.client, "list_dir", side_effect=broken):
+            self.assertEqual(self.a.push(), 1)
+        self.assertFalse(self.a.sync.local_changed())
 
 
 class HostileRemoteTest(SyncServiceTestBase):

@@ -835,6 +835,16 @@ class RealDialogsTest(SyncUiTestCase):
         self.assertIn("последняя синхронизация 29.09.2026 08:15", seen["text"])
         self.assertIn("«Телефон», сохранена 30.09.2026 10:00", seen["text"])
 
+    def test_never_synced_conflict_offers_only_take_from_disk(self):
+        check = SyncCheck(SyncStatus.CONFLICT, self.META, never_synced=True)
+        for click, expected in (("Взять с Диска", "remote"), ("Отмена", "")):
+            result, seen = self._ask(REAL_ASK_CONFLICT, click, check)
+            self.assertEqual(result, expected)
+        with self.assertRaises(AssertionError):            # кнопки «Оставить эту» нет
+            self._ask(REAL_ASK_CONFLICT, "Оставить эту", check)
+        self.assertEqual(seen["default"], "Отмена")
+        self.assertIn("ни разу её не загружал", seen["text"])
+
     def test_conflict_with_unknown_local_sync_time(self):
         check = SyncCheck(SyncStatus.CONFLICT, self.META)
         _, seen = self._ask(REAL_ASK_CONFLICT, "Отмена", check)

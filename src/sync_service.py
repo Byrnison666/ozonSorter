@@ -32,6 +32,10 @@ from .webdav import WebDavClient, WebDavError
 
 META_NAME = "meta.json"
 KEEP_REMOTE_REVISIONS = 5
+# Ежедневные копии в отдельной папке: очистка ревизий их не трогает, и цепочка
+# ошибочных выгрузок за один день не вытеснит вчерашнюю базу.
+BACKUP_DIR = "backups"
+KEEP_DAILY_BACKUPS = 30
 KEEP_PRESYNC_BACKUPS = 10
 _MAX_META_BYTES = 64 * 1024
 # Распакованная база больше этого — не наша: защита от «gzip-бомбы» в файле с Диска.
@@ -41,6 +45,15 @@ _MAX_REV = 999_998
 # файлы друг друга, и meta.json всегда указывает на файл со своим содержимым.
 _REVISION_RE = re.compile(r"ozon_sorter_rev(\d{6})_([0-9a-f]{8})\.db\.gz", re.ASCII)
 _SHA256_RE = re.compile(r"[0-9a-f]{64}", re.ASCII)
+_DAILY_RE = re.compile(r"ozon_sorter_\d{4}-\d{2}-\d{2}\.db\.gz", re.ASCII)
+_EMPTY_BASE_ERROR = (
+    "На этом устройстве пустая база: выкладывать её поверх данных на Диске нельзя. "
+    "Загрузите базу с Диска."
+)
+_NEVER_SYNCED_ERROR = (
+    "Это устройство ещё ни разу не загружало базу с Диска: заменять ею базу на Диске "
+    "нельзя. Загрузите базу с Диска."
+)
 SAVED_AT_FORMAT = "%Y-%m-%d %H:%M:%S"
 # Объекты, которые программа создаёт сама. Всё остальное в базе с Диска —
 # постороннее: триггер или представление исполнялись бы внутри программы.
@@ -112,6 +125,9 @@ class SyncCheck:
     remote_is_older: bool = False
     # Когда это устройство последний раз обменялось базой с Диском; "" — неизвестно.
     local_synced_at: str = ""
+    # Устройство ещё ни разу не загружало и не выкладывало базу в это место Диска:
+    # заменять ею базу на Диске нельзя.
+    never_synced: bool = False
 
 
 def _replace_file(src: str, dst: str, attempts: int = 10, delay: float = 0.3) -> None:
@@ -334,7 +350,8 @@ class SyncService:
             state["base_rev"] > 0 and meta.rev == state["base_rev"]
             and meta.sha256 != state["base_sha256"]
         )
-        return SyncCheck(status, meta, remote_is_older=rewound, local_synced_at=state["synced_at"])
+        return SyncCheck(status, meta, remote_is_older=rewound, local_synced_at=state["synced_at"],
+                         never_synced=state["base_rev"] == 0)
 
     def push(self, expected: Optional[RemoteMeta], token: Optional[CancelToken] = None) -> int:
         """Выложить локальную базу новой ревизией. Возвращает номер ревизии.
@@ -347,6 +364,14 @@ class SyncService:
         sha = hashlib.sha256(raw).hexdigest()
         # Повреждённую базу не выкладываем: она сломала бы второе устройство.
         _validate_database(self.db_path)
+        state = self._load_state()
+        if expected is not None:
+            # Поверх базы на Диске — только базу, которая от неё происходит. Пустая
+            # база или база устройства, ни разу не загружавшего Диск, стёрла бы данные.
+            if self._local_is_empty():
+                raise SyncError(_EMPTY_BASE_ERROR)
+            if state["base_rev"] == 0:
+                raise SyncError(_NEVER_SYNCED_ERROR)
         conn = sqlite3.connect(self.db_path)
         try:
             schema_version = conn.execute("PRAGMA user_version").fetchone()[0]
@@ -355,7 +380,7 @@ class SyncService:
 
         # От максимума: после отката Диска номер не должен оказаться меньше уже
         # виденного другими устройствами.
-        rev = max(expected.rev if expected else 0, self._load_state()["base_rev"]) + 1
+        rev = max(expected.rev if expected else 0, state["base_rev"]) + 1
         if rev > _MAX_REV:
             raise SyncError("Исчерпаны номера ревизий на Диске.")
         name = f"ozon_sorter_rev{rev:06d}_{sha[:8]}.db.gz"
@@ -363,8 +388,8 @@ class SyncService:
         self.client.ensure_dir(self.remote_dir)
         # Сначала данные, потом meta.json: оборванная выгрузка оставит на Диске
         # лишний файл, но текущая ревизия останется прежней и целой.
-        self.client.put(f"{self.remote_dir}/{name}", gzip.compress(raw, 6),
-                        timeout=self.transfer_timeout)
+        packed = gzip.compress(raw, 6)
+        self.client.put(f"{self.remote_dir}/{name}", packed, timeout=self.transfer_timeout)
         (token or CancelToken()).commit()
         if not _same_revision(self.remote_meta(), expected):
             raise SyncError(
@@ -379,8 +404,25 @@ class SyncService:
         self.client.put(f"{self.remote_dir}/{META_NAME}",
                         json.dumps(new_meta, ensure_ascii=False).encode("utf-8"))
         self._remember(rev, sha)
+        self._daily_backup(packed)
         self._prune_remote(rev)
         return rev
+
+    def _daily_backup(self, packed: bytes) -> None:
+        """Первая выгрузка за день кладёт копию в backups/; хранится
+        KEEP_DAILY_BACKUPS последних. Сбой — не сбой выгрузки."""
+        folder = f"{self.remote_dir}/{BACKUP_DIR}"
+        name = f"ozon_sorter_{datetime.now().strftime('%Y-%m-%d')}.db.gz"
+        try:
+            existing = sorted(n for n in self.client.list_dir(folder) if _DAILY_RE.fullmatch(n))
+            if name not in existing:
+                self.client.ensure_dir(folder)
+                self.client.put(f"{folder}/{name}", packed, timeout=self.transfer_timeout)
+                existing = sorted(existing + [name])
+            for old in existing[:-KEEP_DAILY_BACKUPS]:
+                self.client.delete(f"{folder}/{old}")
+        except WebDavError:
+            pass  # выгрузка уже состоялась; копию сделает следующая
 
     def _prune_remote(self, current_rev: int) -> None:
         """Оставить на Диске последние KEEP_REMOTE_REVISIONS ревизий."""

@@ -239,9 +239,31 @@ def _describe_remote(meta) -> str:
     return f"устройство «{meta.device or '—'}», сохранена {_format_time(meta.saved_at)}"
 
 
+def _ask_conflict_never_synced(parent, check) -> str:
+    """Конфликт на устройстве, ни разу не загружавшем базу с Диска: его база
+    не продолжает базу на Диске, и заменить ею Диск — стереть данные."""
+    box = message_box(
+        parent, QMessageBox.Warning, "На Диске уже есть база",
+        "На Яндекс.Диске уже есть база, а этот компьютер ещё ни разу её не загружал.\n"
+        f"Версия на Диске: {_describe_remote(check.meta)}.\n\n"
+        "Заменить базу на Диске базой этого компьютера нельзя — так можно по ошибке "
+        "стереть все данные.\n\n"
+        "«Взять с Диска» — база этого компьютера заменится; прежняя сохранится в "
+        "папке backups/presync.",
+    )
+    keep_remote = box.addButton("Взять с Диска", QMessageBox.DestructiveRole)
+    cancel = box.addButton("Отмена", QMessageBox.RejectRole)
+    box.setDefaultButton(cancel)
+    box.setEscapeButton(cancel)
+    box.exec_()
+    return "remote" if box.clickedButton() is keep_remote else ""
+
+
 def _ask_conflict(parent, check) -> str:
     """Какую версию оставить: 'local', 'remote' или '' (отмена)."""
-    older = ("\nВнимание: версия на Диске не продолжает ту, с которой этот компьютер "
+    if check.never_synced:
+        return _ask_conflict_never_synced(parent, check)
+    older =("\nВнимание: версия на Диске не продолжает ту, с которой этот компьютер "
              "работал (номер меньше либо версию заменили другой базой).\n"
              if check.remote_is_older else "")
     box = message_box(
