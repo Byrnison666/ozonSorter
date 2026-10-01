@@ -41,12 +41,16 @@ describe('разбор отчёта совпадает с ПК', () => {
 
   const cases = [
     'new_format', 'old_format', 'active_second_sheet', 'no_header',
-    'header_variants', 'header_too_low', 'epoch_1904', 'time_only_date',
+    'header_variants', 'header_too_low', 'epoch_1904', 'time_only_date', 'excel_resaved',
   ];
 
   test.each(cases)('%s', (name) => {
     expect(golden[name]).toBeDefined();
     expect(parseFile(join(dir.path, `${name}.xlsx`))).toEqual(golden[name]);
+  });
+
+  test('настоящий отчёт разобран целиком', () => {
+    expect(golden.excel_resaved.rows).toHaveLength(1294);
   });
 
   test('эталон покрывает все случаи скрипта', () => {

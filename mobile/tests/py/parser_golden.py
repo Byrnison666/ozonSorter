@@ -4,6 +4,7 @@ ExcelParser ПК. Печатает JSON {имя: {"rows": [...]} | {"error": "..
 """
 import json
 import os
+import shutil
 import sys
 from datetime import datetime, time
 
@@ -101,6 +102,15 @@ def cases():
     ])
 
 
+# Настоящий отчёт «Остатки на складе», пересохранённый в Excel владельцем:
+# пустые ячейки — <c s="5"/>, строки без номера, хвост с кодами сканера.
+# Обезличен (цифры и названия товаров заменены), разметка листа — как в оригинале.
+FIXTURES = {
+    "excel_resaved": os.path.join(os.path.dirname(__file__), "..", "fixtures",
+                                  "excel_resaved_report.xlsx"),
+}
+
+
 def encode(value):
     if isinstance(value, bool):
         return value
@@ -113,10 +123,19 @@ def encode(value):
     return value
 
 
+def sources():
+    for name, wb in cases():
+        path = os.path.join(OUT, f"{name}.xlsx")
+        wb.save(path)
+        yield name, path
+    for name, src in FIXTURES.items():
+        path = os.path.join(OUT, f"{name}.xlsx")
+        shutil.copyfile(src, path)
+        yield name, path
+
+
 result = {}
-for name, wb in cases():
-    path = os.path.join(OUT, f"{name}.xlsx")
-    wb.save(path)
+for name, path in sources():
     try:
         rows = ExcelParser().parse_file(path)
         result[name] = {"rows": [{k: encode(v) for k, v in r.items()} for r in rows]}
