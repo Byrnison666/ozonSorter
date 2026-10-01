@@ -17,6 +17,9 @@ export function runPython(code: string, ...argv: string[]): string {
     env: {
       ...process.env,
       QT_QPA_PLATFORM: 'offscreen',
+      // libxcb-xinerama для PySide2 (см. CLAUDE.md репозитория).
+      LD_LIBRARY_PATH: [join(process.env.HOME ?? '', '.local/qtlibs'), process.env.LD_LIBRARY_PATH]
+        .filter(Boolean).join(':'),
       TZ: Intl.DateTimeFormat().resolvedOptions().timeZone,
     },
   });

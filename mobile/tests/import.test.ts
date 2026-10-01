@@ -9,41 +9,11 @@ import { parseReport } from '../src/core/parser';
 import { configureConnection, ensureSchema } from '../src/core/schema';
 import { readActiveSheet } from '../src/core/sheet';
 import { openBunDb } from './support/bunDb';
+import { dumpDb, StepClock } from './support/dump';
 import { runPythonScript, tempDir } from './support/pc';
 
-const TIMESTAMP_COLUMNS = new Set(['started_at', 'finished_at', 'first_seen_at', 'last_seen_at']);
-const TS_RE = /^(\d{4})-(\d\d)-(\d\d) (\d\d):(\d\d):(\d\d)\.(\d{6})$/;
-
-/** Окна времени шагов: метка времени в базе заменяется номером шага, в котором записана. */
-const windows: Array<{ step: string; from: number; to: number }> = [];
-
-function stepOf(value: string): string {
-  const m = TS_RE.exec(value);
-  if (!m) return `bad-format:${value}`;
-  const ms = new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6], Math.floor(+m[7] / 1000)).getTime();
-  const hit = windows.find((w) => ms >= w.from - 1 && ms <= w.to + 1);
-  return hit ? `@${hit.step}` : `outside:${value}`;
-}
-
-function dump(path: string) {
-  const db = openBunDb(path);
-  try {
-    const out: Record<string, unknown[]> = {};
-    for (const table of ['clients', 'import_sessions', 'shipments', 'export_sessions']) {
-      const cols = db.all<{ name: string }>(`PRAGMA table_info(${table})`).map((c) => c.name);
-      const select = cols.map((c) => `typeof(${c}) AS "t_${c}", ${c} AS "v_${c}"`).join(', ');
-      out[table] = db.all<Record<string, unknown>>(`SELECT ${select} FROM ${table} ORDER BY id`)
-        .map((row) => Object.fromEntries(cols.map((c) => {
-          const v = row[`v_${c}`];
-          const shown = TIMESTAMP_COLUMNS.has(c) && typeof v === 'string' ? stepOf(v) : v;
-          return [c, [row[`t_${c}`], shown]];
-        })));
-    }
-    return out;
-  } finally {
-    db.close();
-  }
-}
+const clock = new StepClock();
+const dump = (path: string) => dumpDb(path, clock);
 
 function withPhone<T>(path: string, fn: (db: Db) => T): T {
   const db = openBunDb(path);
@@ -63,21 +33,21 @@ describe('импорт отчёта совпадает с ПК', () => {
   const report = (n: string) => join(dir.path, n);
 
   function importBoth(step: string, file: string) {
-    const from = Date.now();
-    const pc = JSON.parse(runPythonScript('import_step.py', pcDb, file));
-    let phone: { session_id?: number; error?: string };
-    try {
-      const bytes = new Uint8Array(readFileSync(file));
-      const sha = createHash('sha256').update(bytes).digest('hex');
-      phone = withPhone(phoneDb, (db) => ({
-        session_id: processImport(db, basename(file), sha, parseReport(readActiveSheet(bytes))).id,
-      }));
-    } catch (e) {
-      phone = { error: (e as Error).message };
-      if (!(e instanceof ImportError)) throw e;
-    }
-    windows.push({ step, from, to: Date.now() });
-    return { pc, phone };
+    return clock.run(step, () => {
+      const pc = JSON.parse(runPythonScript('import_step.py', pcDb, file));
+      let phone: { session_id?: number; error?: string };
+      try {
+        const bytes = new Uint8Array(readFileSync(file));
+        const sha = createHash('sha256').update(bytes).digest('hex');
+        phone = withPhone(phoneDb, (db) => ({
+          session_id: processImport(db, basename(file), sha, parseReport(readActiveSheet(bytes))).id,
+        }));
+      } catch (e) {
+        if (!(e instanceof ImportError)) throw e;
+        phone = { error: e.message };
+      }
+      return { pc, phone };
+    });
   }
 
   function editBoth(sql: string) {

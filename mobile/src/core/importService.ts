@@ -4,18 +4,8 @@
  */
 import type { Db, SqlValue } from './db';
 import { type CellValue, PyDateTime, PyTime, pyJsonDumpsStrings, pyStr, pyStrip } from './py';
+import { AssignmentStatus, type Clock, systemClock } from './models';
 import { isReadyForPickup, normalizeOzonId, type ParsedRow } from './parser';
-
-export const AssignmentStatus = {
-  TO_ASSIGN: 'TO_ASSIGN',
-  TO_SHIP: 'TO_SHIP',
-  ON_POINT: 'ON_POINT',
-  DELIVERED: 'DELIVERED',
-  RETURNED: 'RETURNED',
-  EXCLUDED_NOT_OURS: 'EXCLUDED_NOT_OURS',
-  EXCLUDED_KTY: 'EXCLUDED_KTY',
-} as const;
-export type AssignmentStatus = (typeof AssignmentStatus)[keyof typeof AssignmentStatus];
 
 export class ImportError extends Error {}
 
@@ -78,18 +68,12 @@ export function findDuplicateImport(db: Db, sha256: string): ImportSessionRow | 
   );
 }
 
-export interface ImportClock {
-  now(): PyDateTime;
-}
-
-const systemClock: ImportClock = { now: () => PyDateTime.now() };
-
 /**
  * process_import. fileName — имя файла без пути, sha256 — хэш его содержимого.
  * Всё в одной транзакции: при ошибке база не меняется.
  */
 export function processImport(
-  db: Db, fileName: string, sha256: string, rows: ParsedRow[], clock: ImportClock = systemClock,
+  db: Db, fileName: string, sha256: string, rows: ParsedRow[], clock: Clock = systemClock,
 ): ImportSessionRow {
   let sessionId = 0;
   db.transaction(() => {
