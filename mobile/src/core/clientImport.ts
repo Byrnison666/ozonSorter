@@ -8,6 +8,7 @@ import { type Clock, DeliveryPoint, systemClock } from './models';
 import { normalizeOzonId } from './parser';
 import { isDigits } from './clients';
 import { type CellValue, pyStr, pyStrip } from './py';
+import { writeXlsx } from './xlsxWriter';
 
 type Logical = 'ozon_client_id' | 'full_name' | 'phone' | 'point';
 
@@ -28,6 +29,20 @@ const POINT_ALIASES: Readonly<Record<string, DeliveryPoint>> = {
 const REQUIRED: readonly Logical[] = ['ozon_client_id', 'point'];
 
 export const TEMPLATE_HEADERS = ['Ozon ID', 'ФИО', 'Телефон', 'Точка'] as const;
+
+/** Шаблон файла клиентов (write_template). */
+export function writeClientTemplate(): Uint8Array {
+  const row = (values: string[]) => values.map((value) => ({ value }));
+  return writeXlsx({
+    name: 'Клиенты',
+    rows: [
+      row([...TEMPLATE_HEADERS]),
+      row(['0224933356', 'Иванов И.И.', '', 'Комсомольская 4']),
+      row(['0301234567', 'Петров П.П.', '', 'Кольцевая 16']),
+    ],
+    widths: [16, 22, 16, 20],
+  });
+}
 
 export interface ClientImportResult {
   added: number;
