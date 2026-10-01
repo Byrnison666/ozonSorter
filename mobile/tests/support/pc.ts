@@ -7,22 +7,24 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
 export const REPO_ROOT = resolve(import.meta.dir, '../../..');
-const PYTHON = join(REPO_ROOT, '.venv/bin/python');
+export const PYTHON = join(REPO_ROOT, '.venv/bin/python');
+export const PY_SCRIPTS = join(import.meta.dir, '../py');
+
+export function pythonEnv(): Record<string, string | undefined> {
+  return {
+    ...process.env,
+    QT_QPA_PLATFORM: 'offscreen',
+    // libxcb-xinerama для PySide2 (см. CLAUDE.md репозитория).
+    LD_LIBRARY_PATH: [join(process.env.HOME ?? '', '.local/qtlibs'), process.env.LD_LIBRARY_PATH]
+      .filter(Boolean).join(':'),
+    // bun test сам работает в UTC; Python должен считать местное время так же.
+    TZ: Intl.DateTimeFormat().resolvedOptions().timeZone,
+  };
+}
 
 /** Выполнить Python-код в корне репозитория; вернуть stdout. argv — sys.argv[1:]. */
 export function runPython(code: string, ...argv: string[]): string {
-  const proc = Bun.spawnSync([PYTHON, '-c', code, ...argv], {
-    cwd: REPO_ROOT,
-    // bun test сам работает в UTC; Python должен считать местное время так же.
-    env: {
-      ...process.env,
-      QT_QPA_PLATFORM: 'offscreen',
-      // libxcb-xinerama для PySide2 (см. CLAUDE.md репозитория).
-      LD_LIBRARY_PATH: [join(process.env.HOME ?? '', '.local/qtlibs'), process.env.LD_LIBRARY_PATH]
-        .filter(Boolean).join(':'),
-      TZ: Intl.DateTimeFormat().resolvedOptions().timeZone,
-    },
-  });
+  const proc = Bun.spawnSync([PYTHON, '-c', code, ...argv], { cwd: REPO_ROOT, env: pythonEnv() });
   if (proc.exitCode !== 0) {
     throw new Error(`python failed (${proc.exitCode}):\n${proc.stderr.toString()}`);
   }
@@ -35,7 +37,7 @@ export function runPythonScript(name: string, ...argv: string[]): string {
     'import runpy, sys\n' +
       "sys.argv = sys.argv[1:]\n" +
       "runpy.run_path(sys.argv[0], run_name='__main__')\n",
-    join(import.meta.dir, '../py', name),
+    join(PY_SCRIPTS, name),
     ...argv,
   );
 }
