@@ -406,6 +406,13 @@ export class SyncService {
     const raw = await this.readLocal();
     const sha = await this.deps.sha256(raw);
     validateDatabase(this.deps, this.dbPath); // повреждённую не выкладываем
+    // Пустая база (новая установка, стёртые данные) поверх базы на Диске — потеря
+    // всех данных. Сценарий сюда её не приводит; это последний рубеж.
+    if (expected !== null && (await this.localIsEmpty())) {
+      throw new SyncError(
+        'На этом устройстве пустая база: выкладывать её поверх данных на Диске нельзя. Загрузите базу с Диска.',
+      );
+    }
     const db = this.deps.openDb(this.dbPath);
     let schemaVersion: number;
     try {
