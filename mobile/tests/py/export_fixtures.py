@@ -37,11 +37,12 @@ n = 0
 
 
 def ship(client, cell, *, status=S.TO_SHIP, point=None, seen=None, exported=None,
-         name="Товар", label="lbl", damaged=False, first=datetime(2026, 9, 29, 8, 0)):
+         name="Товар", label="lbl", damaged=False, first=datetime(2026, 9, 29, 8, 0),
+         posting=None):
     global n
     n += 1
     s.add(Shipment(
-        posting_number=f"{client.ozon_client_id if client else 'ii'}-{n:04d}-1",
+        posting_number=posting or f"{client.ozon_client_id if client else 'ii'}-{n:04d}-1",
         client_id=client.id if client else None,
         ozon_client_id_raw=client.ozon_client_id if client else "",
         product_label=label, product_name=name, cell=cell, is_damaged=damaged,
@@ -69,6 +70,10 @@ ship(boris, "7-1", name="Кольцевая 1")
 ship(boris, "7-2", damaged=True, first=datetime(2026, 9, 15, 0, 0))
 ship(gone, "8-1")                                    # клиент удалён
 ship(None, "9-1", status=S.EXCLUDED_KTY)
+# Равные ключи сортировки: тот же номер и ячейка, разные штрихкоды.
+ship(anna, "6-1", label="L2", posting="224933356-9999-1", first=datetime(2026, 9, 25, 8, 0))
+ship(anna, "6-1", label="L1", posting="224933356-9999-1", first=datetime(2026, 9, 25, 9, 0))
+ship(anna, "6-2", first=datetime(2026, 9, 30, 10, 0))   # позже даты отчёта — 0 дней
 s.commit()
 s.close()
 db.engine.dispose()
