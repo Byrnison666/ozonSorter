@@ -1,4 +1,4 @@
-import { openDatabaseSync, type SQLiteDatabase } from 'expo-sqlite';
+import { defaultDatabaseDirectory, openDatabaseSync, type SQLiteDatabase } from 'expo-sqlite';
 
 import type { Db, RunResult, SqlValue } from '../core/db';
 
@@ -31,7 +31,14 @@ class ExpoDb implements Db {
   }
 }
 
-/** directory — папка файла базы (по умолчанию каталог SQLite приложения). */
-export function openExpoDb(name: string, directory?: string): Db {
-  return new ExpoDb(openDatabaseSync(name, undefined, directory));
+/** Каталог данных приложения: база, копии, состояние синхронизации. */
+export const DATA_DIR: string = defaultDatabaseDirectory;
+
+/**
+ * Открыть файл SQLite по абсолютному пути. Отдельное соединение: синхронизация
+ * проверяет и читает файлы, пока основное закрыто.
+ */
+export function openExpoDb(path: string): Db {
+  const slash = path.lastIndexOf('/');
+  return new ExpoDb(openDatabaseSync(path.slice(slash + 1), { useNewConnection: true }, path.slice(0, slash)));
 }
