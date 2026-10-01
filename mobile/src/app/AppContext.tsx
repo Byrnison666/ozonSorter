@@ -220,11 +220,16 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const ui: SyncUi = useMemo(() => ({
     withProgress,
-    askConflict: (check) => ask('Изменения с двух сторон', texts.conflict(check), [
+    askConflict: (check) => (check.neverSynced
+      ? ask('На Диске уже есть база', texts.conflictNeverSynced(check), [
+        { text: 'Отмена', value: '' as const, style: 'cancel' },
+        { text: 'Взять с Диска', value: 'remote' as const, style: 'destructive' },
+      ], '' as const)
+      : ask('Изменения с двух сторон', texts.conflict(check), [
       { text: 'Отмена', value: '' as const, style: 'cancel' },
       { text: 'Взять с Диска', value: 'remote' as const, style: 'destructive' },
       { text: 'Оставить эту', value: 'local' as const },
-    ], '' as const),
+    ], '' as const)),
     askPull: (check) => ask(
       check.remoteIsOlder ? 'На Диске более старая база' : 'На Диске более новая база',
       texts.pull(check),

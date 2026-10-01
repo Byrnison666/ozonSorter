@@ -147,11 +147,20 @@ describe('телефон отказался загружать базу и на�
     expect(await diskMeta()).toBe(before);
   });
 
-  test('после «Оставить эту» база ПК остаётся на Диске прежней ревизией', async () => {
+  test('«Оставить эту» невозможно: окно без неё, выгрузка отказывает, Диск прежний', async () => {
     const phone = freshPhone();
     phone.addClient('999');
-    const { impl } = ui({ conflict: 'local' });
-    expect(await syncInteractive(phone.sync, host, impl, online)).toBe(true);
-    expect((await server.list()).some((p) => p.includes('rev000001_'))).toBe(true);
+    const check = await phone.sync.check();
+    expect(check.neverSynced).toBe(true);
+    const before = await diskMeta();
+    const { impl } = ui({ conflict: 'local' }); // даже если интерфейс вернул «оставить»
+    const shown: string[] = [];
+    impl.showMessage = async (_k, _t, text) => {
+      shown.push(text);
+    };
+    expect(await syncInteractive(phone.sync, host, impl, online)).toBe(false);
+    expect(shown[0]).toContain('ни разу не загружало');
+    expect(await diskMeta()).toBe(before);
+    expect(pc.run<string[]>('client_ids')).toEqual(['111', '222', '333']);
   });
 });

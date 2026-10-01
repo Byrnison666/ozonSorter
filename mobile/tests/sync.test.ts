@@ -118,6 +118,20 @@ describe('обмен базой ПК ↔ телефон', () => {
     expect(pc.run<PcCheck>('check').status).toBe('CONFLICT');
   });
 
+  test('ежедневная копия общая для ПК и телефона: одна за день, не перезаписывается', async () => {
+    const d = new Date();
+    const today = `/OzonSorter/backups/ozon_sorter_${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}.db.gz`;
+    pc.run('add_client', '111');
+    pc.run('push');
+    const pcCopy = await server.get(today);
+    expect(pcCopy).not.toBeNull();
+    await phone.pull();
+    phone.addClient('222');
+    await phone.push();
+    expect(await server.get(today)).toEqual(pcCopy);
+    expect((await server.list()).filter((p) => p.startsWith('/OzonSorter/backups/'))).toEqual([today]);
+  });
+
   test('на Диске остаются 5 последних ревизий, кто бы ни выкладывал', async () => {
     pc.run('add_client', '100');
     pc.run('push');
@@ -132,7 +146,7 @@ describe('обмен базой ПК ↔ телефон', () => {
         pc.run('push');
       }
     }
-    const revs = (await server.list()).filter((p) => p.endsWith('.db.gz'))
+    const revs = (await server.list()).filter((p) => p.startsWith('/OzonSorter/ozon_sorter_rev'))
       .map((p) => Number(/rev(\d{6})_/.exec(p)![1])).sort((a, b) => a - b);
     expect(revs).toEqual([3, 4, 5, 6, 7]);
   });

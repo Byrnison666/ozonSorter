@@ -261,6 +261,36 @@ describe('обмен и отказы', () => {
   });
 });
 
+describe('ежедневные копии на Диске', () => {
+  const prefix = `/${REMOTE_DIR}/backups/`;
+  const fixed: SyncDeps = { ...nodeDeps, clock: { now: () => new PyDateTime(2026, 3, 15, 9, 0, 0) } };
+
+  test('копий не больше 30, чужие файлы в папке не трогаются', async () => {
+    for (const [month, days] of [[1, 31], [2, 4]] as const) {
+      for (let day = 1; day <= days; day++) {
+        await server.put(`${prefix}ozon_sorter_2026-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}.db.gz`, 'x');
+      }
+    }
+    await server.put(`${prefix}заметки.txt`, 'keep');
+    const p = new Phone(a.dir, server, {}, fixed);
+    p.addClient('1');
+    await p.push();
+    const files = await server.list();
+    const dated = files.filter((f) => f.startsWith(prefix) && f.endsWith('.db.gz'));
+    expect(dated.length).toBe(30);
+    expect(dated).toContain(`${prefix}ozon_sorter_2026-03-15.db.gz`);
+    expect(dated).not.toContain(`${prefix}ozon_sorter_2026-01-01.db.gz`);
+    expect(files).toContain(`${prefix}заметки.txt`);
+  });
+
+  test('сбой копии не роняет выгрузку', async () => {
+    a.addClient('1');
+    await server.control({ cmd: 'fail_next', method: 'PROPFIND', code: 500 });
+    expect(await a.push()).toBe(1);
+    expect(await a.sync.localChanged()).toBe(false);
+  });
+});
+
 describe('недоверенное содержимое Диска', () => {
   async function assertBUntouched() {
     expect(b.clientIds()).toEqual(['999']);

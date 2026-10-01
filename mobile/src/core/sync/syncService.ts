@@ -17,6 +17,15 @@ import { WebDavClient, WebDavError } from './webdav';
 export const META_NAME = 'meta.json';
 export const KEEP_REMOTE_REVISIONS = 5;
 export const KEEP_PRESYNC_BACKUPS = 10;
+// Ежедневные копии в отдельной папке: очистка ревизий их не трогает, и цепочка
+// ошибочных выгрузок за один день не вытеснит вчерашнюю базу.
+export const BACKUP_DIR = 'backups';
+export const KEEP_DAILY_BACKUPS = 30;
+const DAILY_RE = /^ozon_sorter_\d{4}-\d{2}-\d{2}\.db\.gz$/;
+const EMPTY_BASE_ERROR =
+  'На этом устройстве пустая база: выкладывать её поверх данных на Диске нельзя. Загрузите базу с Диска.';
+const NEVER_SYNCED_ERROR =
+  'Это устройство ещё ни разу не загружало базу с Диска: заменять ею базу на Диске нельзя. Загрузите базу с Диска.';
 const MAX_META_BYTES = 64 * 1024;
 /** Распакованная база больше этого — не наша (защита от gzip-бомбы). */
 export const MAX_DB_BYTES = 512 * 1024 * 1024;
@@ -83,6 +92,8 @@ export interface SyncCheck {
   remoteIsOlder: boolean;
   /** Когда устройство последний раз обменялось базой; '' — неизвестно. */
   localSyncedAt: string;
+  /** Устройство ни разу не загружало и не выкладывало базу в это место Диска. */
+  neverSynced: boolean;
 }
 
 /** Локальные файлы устройства. Пути — строки платформы. */
@@ -371,7 +382,7 @@ export class SyncService {
     const localSha = await this.localSha();
     const localChanged = await this.localDiffersFromBase(localSha, state.base_sha256);
     const result = (status: SyncStatus, m: RemoteMeta | null, remoteIsOlder = false): SyncCheck =>
-      ({ status, meta: m, remoteIsOlder, localSyncedAt: state.synced_at });
+      ({ status, meta: m, remoteIsOlder, localSyncedAt: state.synced_at, neverSynced: state.base_rev === 0 });
 
     if (meta === null) {
       if (state.base_rev > 0 && !(await this.localIsEmpty())) {
@@ -406,12 +417,12 @@ export class SyncService {
     const raw = await this.readLocal();
     const sha = await this.deps.sha256(raw);
     validateDatabase(this.deps, this.dbPath); // повреждённую не выкладываем
-    // Пустая база (новая установка, стёртые данные) поверх базы на Диске — потеря
-    // всех данных. Сценарий сюда её не приводит; это последний рубеж.
-    if (expected !== null && (await this.localIsEmpty())) {
-      throw new SyncError(
-        'На этом устройстве пустая база: выкладывать её поверх данных на Диске нельзя. Загрузите базу с Диска.',
-      );
+    const state = await this.loadState();
+    if (expected !== null) {
+      // Поверх базы на Диске — только базу, которая от неё происходит. Пустая база
+      // или база устройства, ни разу не загружавшего Диск, стёрла бы данные.
+      if (await this.localIsEmpty()) throw new SyncError(EMPTY_BASE_ERROR);
+      if (state.base_rev === 0) throw new SyncError(NEVER_SYNCED_ERROR);
     }
     const db = this.deps.openDb(this.dbPath);
     let schemaVersion: number;
@@ -421,13 +432,14 @@ export class SyncService {
       db.close();
     }
     // От максимума: после отката Диска номер не должен стать меньше виденного.
-    const rev = Math.max(expected?.rev ?? 0, (await this.loadState()).base_rev) + 1;
+    const rev = Math.max(expected?.rev ?? 0, state.base_rev) + 1;
     if (rev > MAX_REV) throw new SyncError('Исчерпаны номера ревизий на Диске.');
     const name = `ozon_sorter_rev${String(rev).padStart(6, '0')}_${sha.slice(0, 8)}.db.gz`;
 
     await this.client.ensureDir(this.remoteDir);
     // Сначала данные, потом meta.json: оборванная выгрузка не ломает текущую ревизию.
-    await this.client.put(`${this.remoteDir}/${name}`, gzipSync(raw, { level: 6 }), this.transferTimeoutMs);
+    const packed = gzipSync(raw, { level: 6 });
+    await this.client.put(`${this.remoteDir}/${name}`, packed, this.transferTimeoutMs);
     token.commit();
     if (!sameRevision(await this.remoteMeta(), expected)) {
       throw new SyncError('Пока шла выгрузка, базу на Диске изменило другое устройство. Повторите синхронизацию.');
@@ -438,8 +450,32 @@ export class SyncService {
     };
     await this.client.put(`${this.remoteDir}/${META_NAME}`, new TextEncoder().encode(dumpMeta(meta)));
     await this.remember(rev, sha);
+    await this.dailyBackup(packed);
     await this.pruneRemote(rev);
     return rev;
+  }
+
+  /** Первая выгрузка за день кладёт копию в backups/; сбой — не сбой выгрузки. */
+  private async dailyBackup(packed: Uint8Array): Promise<void> {
+    const folder = `${this.remoteDir}/${BACKUP_DIR}`;
+    const now = this.deps.clock.now();
+    const p = (v: number, w: number) => String(v).padStart(w, '0');
+    const name = `ozon_sorter_${p(now.year, 4)}-${p(now.month, 2)}-${p(now.day, 2)}.db.gz`;
+    try {
+      const existing = (await this.client.listDir(folder)).filter((n) => DAILY_RE.test(n)).sort();
+      if (!existing.includes(name)) {
+        await this.client.ensureDir(folder);
+        await this.client.put(`${folder}/${name}`, packed, this.transferTimeoutMs);
+        existing.push(name);
+        existing.sort();
+      }
+      for (const old of existing.slice(0, Math.max(0, existing.length - KEEP_DAILY_BACKUPS))) {
+        await this.client.delete(`${folder}/${old}`);
+      }
+    } catch (e) {
+      if (!(e instanceof WebDavError)) throw e;
+      // выгрузка уже состоялась; копию сделает следующая
+    }
   }
 
   private async pruneRemote(currentRev: number): Promise<void> {
