@@ -14,7 +14,7 @@ import { configureConnection, ensureSchema } from '../../src/core/schema';
 import {
   type LocalFiles, type SyncDeps, SyncService, type SyncOptions,
 } from '../../src/core/sync/syncService';
-import { fetchTransport, WebDavClient } from '../../src/core/sync/webdav';
+import { fetchTransport, type Transport, WebDavClient } from '../../src/core/sync/webdav';
 import { openBunDb } from './bunDb';
 import { PY_SCRIPTS, PYTHON, pythonEnv, REPO_ROOT, runPythonScript } from './pc';
 
@@ -45,7 +45,9 @@ export async function startDavServer(): Promise<DavServer> {
   reader.releaseLock();
   const { url, control: controlUrl } = JSON.parse(text.split('\n')[0]);
   const control = async <T>(cmd: Record<string, unknown>): Promise<T> => {
-    const r = await fetch(controlUrl, { method: 'POST', body: JSON.stringify(cmd) });
+    const r = await fetch(controlUrl, {
+      method: 'POST', body: JSON.stringify(cmd), headers: { Connection: 'close' },
+    });
     return (await r.json()) as T;
   };
   return {
@@ -68,6 +70,15 @@ export async function startDavServer(): Promise<DavServer> {
     },
   };
 }
+
+/**
+ * Тестовые серверы на http.server Python (HTTP/1.0) закрывают соединение после
+ * ответа, а fetch Bun иногда берёт его из пула повторно — ECONNRESET. Отказ от
+ * keep-alive убирает гонку; к телефону и Яндекс.Диску это не относится.
+ */
+const testTransport: Transport = {
+  request: (req) => fetchTransport.request({ ...req, headers: { ...req.headers, Connection: 'close' } }),
+};
 
 export const nodeFiles: LocalFiles = {
   exists: async (p) => existsSync(p),
@@ -116,7 +127,7 @@ export class Phone {
     this.dbPath = join(dir, 'ozon_sorter.db');
     this.sync = new SyncService(deps, {
       dbPath: this.dbPath,
-      client: new WebDavClient(server.url, 'user', 'secret', fetchTransport, 5_000),
+      client: new WebDavClient(server.url, 'user', 'secret', testTransport, 5_000),
       remoteDir: REMOTE_DIR,
       statePath: join(dir, 'sync_state.json'),
       deviceName: 'Телефон',
