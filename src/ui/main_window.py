@@ -142,7 +142,7 @@ class MainWindow(QMainWindow):
         self.sync_btn.clicked.connect(lambda _checked=False: self.sync_now(announce=True))
         layout.addWidget(self.sync_btn)
 
-        footer = QLabel("v1.8.0")
+        footer = QLabel("v1.9.0")
         footer.setObjectName("sidebarFooter")
         layout.addWidget(footer)
 
