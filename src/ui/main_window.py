@@ -9,12 +9,12 @@ from PySide2.QtWidgets import (
 
 from src.sync_config import load_config
 from src.sync_service import SyncStatus
-from src.webdav import WebDavError
+from src.yadisk_api import YaDiskError
 
 from .dashboard_screen import DashboardScreen
 from .clients_screen import ClientsScreen
 from .import_log_screen import ImportLogScreen
-from .settings_screen import SettingsScreen
+from .settings_screen import SettingsScreen, stop_login_threads
 from .stale_screen import StaleScreen
 from .sync_flow import (
     BackgroundCheck, ask_yes_no, describe_error, has_local_changes, message_box,
@@ -219,12 +219,12 @@ class MainWindow(QMainWindow):
     def startup_sync(self):
         """Проверка Диска при запуске — в фоне, окно не блокируется."""
         config = load_config()
-        if config.password_unreadable:
+        if config.token_unreadable:
             show_message(
                 self, QMessageBox.Warning, "Синхронизация выключена",
-                "Сохранённый пароль приложения Яндекса не удалось прочитать "
+                "Сохранённый вход в Яндекс не удалось прочитать "
                 "(сменилась учётная запись Windows или файл перенесён с другого "
-                "компьютера).\n\nВведите пароль заново в «Настройках».",
+                "компьютера).\n\nВойдите в Яндекс заново в «Настройках».",
             )
             return
         if not config.is_configured:
@@ -232,7 +232,7 @@ class MainWindow(QMainWindow):
         try:
             self._startup_check = BackgroundCheck(config, self.db_manager.db_path)
         except ValueError:
-            return  # адрес сервера в настройках не https — синхронизация не работает
+            return  # адрес API не https — синхронизация не работает
         self._startup_check.finished.connect(self._on_startup_check)
         self._startup_check.start()
 
@@ -254,7 +254,7 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(500, lambda: self._handle_startup_result(error, check))
             return
         if error is not None:
-            if isinstance(error, WebDavError) and error.is_network_error:
+            if isinstance(error, YaDiskError) and error.is_network_error:
                 # Без интернета молчим, пока выкладывать нечего.
                 if has_local_changes(self, load_config()) is True:
                     self.sync_now(confirm_pull=True, assume_offline=True)
@@ -276,6 +276,7 @@ class MainWindow(QMainWindow):
                 worker.wait()
             worker.deleteLater()
         stop_pending_work()
+        stop_login_threads()
 
     def _sync_before_close(self) -> bool:
         """Предложить выложить изменения. False — закрытие окна отменено."""

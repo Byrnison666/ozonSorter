@@ -11,22 +11,26 @@ import { ActivityIndicator, Alert, AppState, Modal, StyleSheet, Text, View } fro
 
 import type { Db } from '../core/db';
 import { configureConnection, ensureSchema } from '../core/schema';
-import { defaultConfig, isConfigured, type SyncConfig, targetId } from '../core/sync/config';
+import { defaultConfig, isConfigured, needsRefresh, type SyncConfig, targetId } from '../core/sync/config';
 import {
-  backgroundPush, type DbHost, hasLocalChanges, type InteractiveOptions, startupAction,
-  syncInteractive, type SyncUi, texts, VPN_HINT,
+  backgroundPush, type DbHost, hasLocalChanges, type InteractiveOptions, SLOW_SPEED, SpeedMeter,
+  startupAction, syncInteractive, type SyncUi, texts, transferText, VPN_HINT,
 } from '../core/sync/flow';
 import { CancelToken, SyncCancelled, SyncError, SyncService } from '../core/sync/syncService';
-import { fetchTransport, WebDavClient } from '../core/sync/webdav';
+import { type Progress, YaDiskClient } from '../core/sync/yadisk';
+import { refreshTokens } from '../core/sync/yandexOAuth';
 import { openExpoDb } from '../platform/expoDb';
 import { DB_PATH, deviceDeps, loadConfig, saveConfig, sha256, STATE_PATH } from '../platform/deps';
 import { probeInternet } from '../platform/io';
+import { oauthEnv, transport } from '../platform/yandex';
 import { Button } from '../ui/components';
 import { colors, radius, space } from '../ui/theme';
 
 const CHECK_TIMEOUT_MS = 15_000;
 const TRANSFER_TIMEOUT_MS = 300_000;
 const SLOW_HINT_MS = 10_000;
+// Чаще не перерисовываем индикатор передачи.
+const PROGRESS_INTERVAL_MS = 100;
 
 export type Dirty = boolean | null;
 
@@ -93,11 +97,13 @@ function messageBox(title: string, text: string): Promise<void> {
   return ask(title, text, [{ text: 'OK', value: undefined }], undefined);
 }
 
-interface Progress {
+interface Busy {
   text: string;
   cancel?: () => void;
   cancelling: boolean;
   slow: boolean;
+  /** Ход передачи файла: доля 0..1 (null — размер неизвестен) и подпись. */
+  transfer?: { fraction: number | null; text: string };
 }
 
 export function AppProvider({ children }: { children: ReactNode }) {
@@ -109,7 +115,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [dirty, setDirty] = useState<Dirty>(null);
   const [syncBusy, setSyncBusy] = useState(false);
   const busyRef = useRef(false);
-  const [progress, setProgress] = useState<Progress | null>(null);
+  const [progress, setProgress] = useState<Busy | null>(null);
   // Отменённые операции ещё ждут сеть; новые не начинаем, пока они не закончатся.
   const abandoned = useRef(new Set<Promise<unknown>>());
 
@@ -149,7 +155,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const makeService = useCallback(async (c: SyncConfig) => new SyncService(deviceDeps, {
     dbPath: DB_PATH,
-    client: new WebDavClient(c.url, c.login, c.password, fetchTransport, CHECK_TIMEOUT_MS),
+    client: new YaDiskClient(c.token, c.apiUrl, transport, CHECK_TIMEOUT_MS),
     remoteDir: c.remoteDir,
     statePath: STATE_PATH,
     deviceName: c.deviceName,
@@ -167,13 +173,58 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }
   }, [makeService]);
 
-  const withProgress = useCallback(async <T,>(text: string, fn: (t: CancelToken) => Promise<T>): Promise<T> => {
+  /**
+   * Токен действует год; за месяц до конца обновляем. Сбой не мешает
+   * синхронизации: старый токен ещё действует, обновим в следующий раз.
+   */
+  const freshConfig = useCallback(async (c: SyncConfig): Promise<SyncConfig> => {
+    if (!needsRefresh(c)) return c;
+    let next: SyncConfig;
+    try {
+      const t = await refreshTokens(oauthEnv, c.refreshToken);
+      next = { ...c, token: t.accessToken, refreshToken: t.refreshToken, tokenExpiresAt: t.expiresAt };
+    } catch (e) {
+      console.warn('Token refresh failed', e);
+      return c;
+    }
+    try {
+      await saveConfig(next);
+    } catch (e) {
+      console.warn('Refreshed token was not saved', e); // проработает до перезапуска
+    }
+    configRef.current = next;
+    setConfig(next);
+    return next;
+  }, []);
+
+  const withProgress = useCallback(async <T,>(
+    text: string, fn: (t: CancelToken, onProgress: Progress) => Promise<T>,
+  ): Promise<T> => {
     if (abandoned.current.size) throw new SyncError('Предыдущая операция ещё завершается. Повторите через минуту.');
     const token = new CancelToken();
-    const work = fn(token);
+    const meter = new SpeedMeter();
+    let lastDraw = 0;
+    let done = false;
+    const onProgress: Progress = (sent, total) => {
+      if (done) return;
+      const now = Date.now();
+      meter.add(sent, now);
+      if (now - lastDraw < PROGRESS_INTERVAL_MS && !(total && sent >= total)) return;
+      lastDraw = now;
+      const transfer = {
+        fraction: total ? Math.min(1, sent / total) : null, text: transferText(sent, total, meter.speed),
+      };
+      setProgress((p) => (p ? { ...p, transfer } : p));
+    };
+    const work = fn(token, onProgress);
     return new Promise<T>((resolve, reject) => {
-      let done = false;
-      const slowTimer = setTimeout(() => setProgress((p) => (p ? { ...p, slow: true } : p)), SLOW_HINT_MS);
+      let slowTimer: ReturnType<typeof setTimeout>;
+      const checkSlow = () => {
+        // Передача идёт с нормальной скоростью — проверим ещё раз позже.
+        if (meter.hasData && meter.speed >= SLOW_SPEED) slowTimer = setTimeout(checkSlow, SLOW_HINT_MS);
+        else setProgress((p) => (p ? { ...p, slow: true } : p));
+      };
+      slowTimer = setTimeout(checkSlow, SLOW_HINT_MS);
       const finish = () => {
         done = true;
         clearTimeout(slowTimer);
@@ -251,20 +302,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
     busyRef.current = true;
     setSyncBusy(true);
     try {
-      let service: SyncService;
-      try {
-        service = await makeService(c);
-      } catch (e) {
-        await messageBox('Синхронизация', `Адрес сервера в настройках не подходит: ${(e as Error).message}`);
-        return false;
-      }
+      const service = await makeService(await freshConfig(c));
       return await syncInteractive(service, host, ui, probeInternet, opts);
     } finally {
       busyRef.current = false;
       setSyncBusy(false);
       void refreshDirty();
     }
-  }, [host, makeService, refreshDirty, ui]);
+  }, [freshConfig, host, makeService, refreshDirty, ui]);
 
   const onDataChanged = useCallback(() => {
     setVersion((v) => v + 1);
@@ -296,12 +341,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       setConfig(c);
       if (!isConfigured(c)) return;
       void refreshDirty();
-      let action;
-      try {
-        action = await startupAction(await makeService(c));
-      } catch {
-        return; // адрес не https — синхронизация выключена до исправления настроек
-      }
+      const action = await startupAction(await makeService(await freshConfig(c)));
       if (!alive) return;
       if (action.kind === 'warn') await messageBox('Синхронизация', action.text);
       else if (action.kind === 'sync') {
@@ -311,7 +351,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     return () => {
       alive = false;
     };
-  }, [host, makeService, refreshDirty, syncNow]);
+  }, [freshConfig, host, makeService, refreshDirty, syncNow]);
 
   // Уход в фон вместо «закрытия программы»: тихо выложить, если можно.
   useEffect(() => {
@@ -344,7 +384,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
         <View style={styles.backdrop}>
           <View style={styles.dialog} accessibilityLiveRegion="polite">
             <Text style={styles.dialogText}>{progress?.text}</Text>
-            <ActivityIndicator size="large" color={colors.primary} />
+            {progress?.transfer?.fraction != null ? (
+              <View style={styles.bar}>
+                <View style={[styles.barFill, { width: `${progress.transfer.fraction * 100}%` }]} />
+              </View>
+            ) : <ActivityIndicator size="large" color={colors.primary} />}
+            {progress?.transfer ? <Text style={styles.hint}>{progress.transfer.text}</Text> : null}
             {progress?.slow ? <Text style={styles.hint}>Связь с Яндекс.Диском медленная. {VPN_HINT}</Text> : null}
             {progress?.cancel ? (
               <Button title="Отмена" onPress={() => progress.cancel?.()} disabled={progress.cancelling} />
@@ -360,5 +405,7 @@ const styles = StyleSheet.create({
   backdrop: { flex: 1, backgroundColor: 'rgba(15,23,42,0.45)', justifyContent: 'center', padding: space.xl },
   dialog: { backgroundColor: colors.surface, borderRadius: radius.lg, padding: space.xl, gap: space.lg },
   dialogText: { fontSize: 16, color: colors.text, textAlign: 'center' },
+  bar: { height: 8, borderRadius: 4, backgroundColor: colors.primarySoft, overflow: 'hidden' },
+  barFill: { height: 8, backgroundColor: colors.primary },
   hint: { fontSize: 13, color: colors.textSecondary, textAlign: 'center', lineHeight: 18 },
 });

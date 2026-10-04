@@ -1,5 +1,5 @@
 /**
- * Синхронизация базы через WebDAV: обмен целым файлом SQLite — перенос
+ * Синхронизация базы через Яндекс.Диск: обмен целым файлом SQLite — перенос
  * src/sync_service.py. Протокол на Диске общий с ПК и должен совпадать с ним
  * (проверяет tests/sync.test.ts обменом между кодом ПК и телефона).
  *
@@ -12,7 +12,7 @@ import type { Db } from '../db';
 import type { Clock } from '../models';
 import { PyDateTime } from '../py';
 import { SCHEMA_VERSION } from '../schema';
-import { WebDavClient, WebDavError } from './webdav';
+import { type Progress, YaDiskClient, YaDiskError } from './yadisk';
 
 export const META_NAME = 'meta.json';
 export const KEEP_REMOTE_REVISIONS = 5;
@@ -248,11 +248,11 @@ function unpack(packed: Uint8Array, maxBytes: number): Uint8Array {
 
 export interface SyncOptions {
   dbPath: string;
-  client: WebDavClient;
+  client: YaDiskClient;
   remoteDir: string;
   statePath: string;
   deviceName: string;
-  /** К чему относится сохранённое состояние (сервер, аккаунт, папка). */
+  /** К чему относится сохранённое состояние (API, аккаунт, папка). */
   targetId?: string;
   /** Передача файла базы идёт дольше служебных запросов. */
   transferTimeoutMs?: number;
@@ -262,7 +262,7 @@ export interface SyncOptions {
 
 export class SyncService {
   readonly dbPath: string;
-  private readonly client: WebDavClient;
+  private readonly client: YaDiskClient;
   private readonly remoteDir: string;
   private readonly statePath: string;
   private readonly deviceName: string;
@@ -413,7 +413,9 @@ export class SyncService {
    * которой принималось решение; если Диск изменился — отказ.
    * Соединения с базой должны быть закрыты.
    */
-  async push(expected: RemoteMeta | null, token: CancelToken = new CancelToken()): Promise<number> {
+  async push(
+    expected: RemoteMeta | null, token: CancelToken = new CancelToken(), onProgress?: Progress,
+  ): Promise<number> {
     const raw = await this.readLocal();
     const sha = await this.deps.sha256(raw);
     validateDatabase(this.deps, this.dbPath); // повреждённую не выкладываем
@@ -439,7 +441,7 @@ export class SyncService {
     await this.client.ensureDir(this.remoteDir);
     // Сначала данные, потом meta.json: оборванная выгрузка не ломает текущую ревизию.
     const packed = gzipSync(raw, { level: 6 });
-    await this.client.put(`${this.remoteDir}/${name}`, packed, this.transferTimeoutMs);
+    await this.client.put(`${this.remoteDir}/${name}`, packed, { timeoutMs: this.transferTimeoutMs, onProgress });
     token.commit();
     if (!sameRevision(await this.remoteMeta(), expected)) {
       throw new SyncError('Пока шла выгрузка, базу на Диске изменило другое устройство. Повторите синхронизацию.');
@@ -450,13 +452,16 @@ export class SyncService {
     };
     await this.client.put(`${this.remoteDir}/${META_NAME}`, new TextEncoder().encode(dumpMeta(meta)));
     await this.remember(rev, sha);
-    await this.dailyBackup(packed);
+    await this.dailyBackup(name);
     await this.pruneRemote(rev);
     return rev;
   }
 
-  /** Первая выгрузка за день кладёт копию в backups/; сбой — не сбой выгрузки. */
-  private async dailyBackup(packed: Uint8Array): Promise<void> {
+  /**
+   * Первая выгрузка за день кладёт копию ревизии в backups/ (копированием на
+   * Диске, без повторной передачи); сбой — не сбой выгрузки.
+   */
+  private async dailyBackup(revision: string): Promise<void> {
     const folder = `${this.remoteDir}/${BACKUP_DIR}`;
     const now = this.deps.clock.now();
     const p = (v: number, w: number) => String(v).padStart(w, '0');
@@ -465,7 +470,7 @@ export class SyncService {
       const existing = (await this.client.listDir(folder)).filter((n) => DAILY_RE.test(n)).sort();
       if (!existing.includes(name)) {
         await this.client.ensureDir(folder);
-        await this.client.put(`${folder}/${name}`, packed, this.transferTimeoutMs);
+        await this.client.copy(`${this.remoteDir}/${revision}`, `${folder}/${name}`, this.transferTimeoutMs);
         existing.push(name);
         existing.sort();
       }
@@ -473,7 +478,7 @@ export class SyncService {
         await this.client.delete(`${folder}/${old}`);
       }
     } catch (e) {
-      if (!(e instanceof WebDavError)) throw e;
+      if (!(e instanceof YaDiskError)) throw e;
       // выгрузка уже состоялась; копию сделает следующая
     }
   }
@@ -487,7 +492,7 @@ export class SyncService {
         }
       }
     } catch (e) {
-      if (!(e instanceof WebDavError)) throw e;
+      if (!(e instanceof YaDiskError)) throw e;
       // выгрузка уже состоялась; лишнее уберёт следующая
     }
   }
@@ -497,7 +502,9 @@ export class SyncService {
    * пользователь согласился загрузить. Прежний файл сохраняется в
    * backups/presync. Соединения с базой должны быть закрыты.
    */
-  async pull(expected: RemoteMeta | null = null, token: CancelToken = new CancelToken()): Promise<number> {
+  async pull(
+    expected: RemoteMeta | null = null, token: CancelToken = new CancelToken(), onProgress?: Progress,
+  ): Promise<number> {
     const meta = await this.remoteMeta();
     if (meta === null) throw new SyncError('На Диске ещё нет базы.');
     if (expected !== null && !sameRevision(meta, expected)) {
@@ -507,7 +514,7 @@ export class SyncService {
       throw new SyncError('База на Диске создана более новой версией программы. Обновите приложение на этом устройстве.');
     }
     const packed = await this.client.get(`${this.remoteDir}/${meta.file}`, {
-      timeoutMs: this.transferTimeoutMs, maxBytes: this.maxDbBytes,
+      timeoutMs: this.transferTimeoutMs, maxBytes: this.maxDbBytes, onProgress,
     });
     if (packed === null) throw new SyncError(`На Диске нет файла базы, на который ссылается ${META_NAME}.`);
     const raw = unpack(packed, this.maxDbBytes);

@@ -1,9 +1,9 @@
-"""Синхронизация базы через WebDAV: два «устройства» с отдельными базами и общим
-локальным WebDAV-сервером (tests/webdav_fake.py). Базы — настоящие SQLite,
+"""Синхронизация базы через Яндекс.Диск: два «устройства» с отдельными базами и
+общим локальным «Диском» (tests/yadisk_fake.py). Базы — настоящие SQLite,
 созданные DatabaseManager, как в приложении.
 
 Отдельные группы тестов — отказы и злоумышленные данные на Диске: к папке имеет
-доступ любой, у кого есть пароль приложения, поэтому meta.json и скачанная база
+доступ любой, у кого есть доступ к аккаунту, поэтому meta.json и скачанная база
 считаются недоверенными.
 """
 import gzip
@@ -27,8 +27,8 @@ from src.sync_service import (
     BACKUP_DIR, CancelToken, KEEP_DAILY_BACKUPS, KEEP_REMOTE_REVISIONS, META_NAME,
     SyncCancelled, SyncError, SyncService, SyncStatus,
 )
-from src.webdav import WebDavClient, WebDavError
-from webdav_fake import FakeWebDavServer
+from src.yadisk_api import YaDiskClient, YaDiskError
+from yadisk_fake import FakeYaDiskServer
 
 REMOTE_DIR = "OzonSorter"
 META_PATH = f"/{REMOTE_DIR}/{META_NAME}"
@@ -41,7 +41,7 @@ class Device:
         self.dir = tempfile.mkdtemp(prefix=f"ozon-sync-{name}-")
         self.db_path = os.path.join(self.dir, "ozon_sorter.db")
         self.sync = SyncService(
-            self.db_path, WebDavClient(server.url, "user", "secret", timeout=5),
+            self.db_path, YaDiskClient(server.token, server.api_url, timeout=5),
             REMOTE_DIR, os.path.join(self.dir, "sync_state.json"), name, target_id=target_id,
         )
         self.open_and_close()  # создать схему, как при первом запуске программы
@@ -117,7 +117,7 @@ def publish(server, raw, rev=1, schema_version=SCHEMA_VERSION, packed=None, **me
 
 class SyncServiceTestBase(unittest.TestCase):
     def setUp(self):
-        self.server = FakeWebDavServer()
+        self.server = FakeYaDiskServer()
         self.a = Device(self.server, "pc")
         self.b = Device(self.server, "phone")
 
@@ -320,8 +320,8 @@ class SyncServiceTest(SyncServiceTestBase):
         original_put = self.a.sync.client.put
         fired = []
 
-        def put_then_other_device_pushes(path, data, timeout=None):
-            original_put(path, data, timeout=timeout)
+        def put_then_other_device_pushes(path, data, **kwargs):
+            original_put(path, data, **kwargs)
             if path.endswith(".db.gz") and not fired:
                 fired.append(True)
                 self.b.push()                         # B успевает раньше A
@@ -407,13 +407,13 @@ class SyncServiceTest(SyncServiceTestBase):
         self.a.add_client("222")
         original_put = self.a.sync.client.put
 
-        def put_failing_on_meta(path, data, timeout=None):
+        def put_failing_on_meta(path, data, **kwargs):
             if path.endswith(META_NAME):
-                raise WebDavError("PUT failed", 507)
-            return original_put(path, data, timeout=timeout)
+                raise YaDiskError("PUT failed", 507)
+            return original_put(path, data, **kwargs)
 
         self.a.sync.client.put = put_failing_on_meta
-        with self.assertRaises(WebDavError):
+        with self.assertRaises(YaDiskError):
             self.a.push()
         self.a.sync.client.put = original_put
 
@@ -427,7 +427,7 @@ class SyncServiceTest(SyncServiceTestBase):
     def test_unreachable_server_raises_network_error(self):
         self.a.add_client("111")
         self.server.offline = True
-        with self.assertRaises(WebDavError) as ctx:
+        with self.assertRaises(YaDiskError) as ctx:
             self.a.sync.check()
         self.assertTrue(ctx.exception.is_network_error)
 
@@ -721,7 +721,7 @@ class DataLossProtectionTest(SyncServiceTestBase):
 
         def broken(path):
             if BACKUP_DIR in path:
-                raise WebDavError("boom")
+                raise YaDiskError("boom")
             return real(path)
 
         with mock.patch.object(self.a.sync.client, "list_dir", side_effect=broken):
@@ -838,7 +838,7 @@ class HostileRemoteTest(SyncServiceTestBase):
     def test_oversized_meta_rejected(self):
         publish(self.server, db_bytes())
         self.server.files[META_PATH] = b" " * (70 * 1024)
-        with self.assertRaises(WebDavError):
+        with self.assertRaises(YaDiskError):
             self.b.sync.remote_meta()
 
     # --- meta.json ---

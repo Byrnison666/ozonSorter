@@ -1,5 +1,5 @@
 """Сквозные сценарии синхронизации через интерфейс (Qt offscreen): главное окно,
-экран «Настройки», экраны данных и локальный WebDAV-сервер.
+экран «Настройки», экраны данных и локальный «Яндекс.Диск» (REST API).
 
 Настоящие модальные диалоги в тестах не показываются (они заблокировали бы
 прогон): вопросы пользователю и итоговые сообщения подменены, а тест задаёт,
@@ -24,14 +24,14 @@ from sqlalchemy import select
 
 from src.database import DatabaseManager
 from src.models import Client, DeliveryPoint
-from src.sync_config import SyncConfig, save_config
+from src.sync_config import SyncConfig, load_config, save_config
 from src.sync_service import (
     CancelToken, RemoteMeta, SyncCancelled, SyncCheck, SyncError, SyncService, SyncStatus,
 )
 from src.ui import clients_screen, sync_flow
 from src.ui.main_window import MainWindow
-from src.webdav import WebDavClient, WebDavError
-from webdav_fake import FakeWebDavServer
+from src.yadisk_api import YaDiskClient, YaDiskError
+from yadisk_fake import FakeYaDiskServer
 
 # Настоящие функции: в тестах они подменяются (ни настоящего интернета, ни
 # настоящих диалогов), но сами тоже проверяются.
@@ -97,7 +97,7 @@ class SyncUiTestCase(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
 
     def setUp(self):
-        self.server = FakeWebDavServer()
+        self.server = FakeYaDiskServer()
         self.dir = tempfile.mkdtemp(prefix="ozon-ui-")
         self.db_path = os.path.join(self.dir, "ozon_sorter.db")
         self.messages = []          # (заголовок, текст) показанных сообщений
@@ -105,10 +105,14 @@ class SyncUiTestCase(unittest.TestCase):
         self.other_db = os.path.join(self.other_dir, "ozon_sorter.db")
 
         self._patch_value("src.sync_config.CONFIG_PATH", os.path.join(self.dir, "sync.json"))
+        self._patch_value("src.sync_config.API_URL", self.server.api_url)
+        self._patch_value("src.sync_config.REMOTE_DIR", "OzonSorter")
         self._patch_value("src.ui.sync_flow.STATE_PATH", os.path.join(self.dir, "sync_state.json"))
+        self._patch_value("src.sync_config.STATE_PATH", os.path.join(self.dir, "sync_state.json"))
         record = lambda parent, icon, title, text: self.messages.append((title, text))
         self._patch("src.ui.sync_flow.show_message", side_effect=record)
         self._patch("src.ui.main_window.show_message", side_effect=record)
+        self._patch("src.ui.settings_screen.show_message", side_effect=record)
         self.ask_conflict = self._patch("src.ui.sync_flow._ask_conflict", return_value="")
         self.ask_pull = self._patch("src.ui.sync_flow._ask_pull", return_value=True)
         self.ask_empty = self._patch("src.ui.sync_flow._ask_push_to_empty_disk", return_value=True)
@@ -116,8 +120,8 @@ class SyncUiTestCase(unittest.TestCase):
         self.internet = self._patch("src.ui.sync_flow.internet_reachable", return_value=True)
         self.ask_yes_no = self._patch("src.ui.main_window.ask_yes_no", return_value=False)
 
-        self.config = SyncConfig(url=self.server.url, login="user", password="secret",
-                                 device_name="ПК")
+        self.config = SyncConfig(token=self.server.token, uid=self.server.uid,
+                                 login=self.server.login, device_name="ПК")
         save_config(self.config)
         _add_client(self.db_path, "111")
         self.db = DatabaseManager(db_path=self.db_path)
@@ -130,7 +134,7 @@ class SyncUiTestCase(unittest.TestCase):
         other_db.create_tables()
         other_db.engine.dispose()       # на Windows открытое соединение держит файл
         self.other = SyncService(
-            self.other_db, WebDavClient(self.server.url, "user", "secret", timeout=5),
+            self.other_db, YaDiskClient(self.server.token, self.server.api_url, timeout=5),
             "OzonSorter", os.path.join(self.other_dir, "sync_state.json"), "Телефон",
             target_id=self.config.target_id,
         )
@@ -193,9 +197,10 @@ class SyncUiTestCase(unittest.TestCase):
 
 
 class SettingsAndManualSyncTest(SyncUiTestCase):
-    def test_settings_form_shows_saved_config_with_password(self):
-        self.assertEqual(self.settings.login_edit.text(), "user")
-        self.assertEqual(self.settings.password_edit.text(), "secret")
+    def test_settings_show_logged_in_account(self):
+        self.assertIn("tester", self.settings.account_label.text())
+        self.assertTrue(self.settings.logout_btn.isVisibleTo(self.settings))
+        self.assertFalse(self.settings.login_btn.isVisibleTo(self.settings))
         self.assertEqual(self.settings.device_edit.text(), "ПК")
 
     def test_sync_button_pushes_local_base_and_announces_success(self):
@@ -231,14 +236,14 @@ class SettingsAndManualSyncTest(SyncUiTestCase):
         finally:
             session.close()
 
-    def test_wrong_password_shows_readable_error(self):
-        self.settings.password_edit.setText("wrong")
+    def test_revoked_token_shows_readable_error(self):
+        self.server.token = "other-token"       # доступ отозван на стороне Яндекса
         self.settings.on_sync()
-        self.assertTrue(any("логин или пароль" in t for t in self._texts()))
+        self.assertTrue(any("не принял вход" in t for t in self._texts()))
         self.assertIn("не выполнена", self.settings.status_label.text())
 
-    def test_empty_credentials_ask_to_fill_form(self):
-        self.settings.login_edit.setText("")
+    def test_sync_without_login_asks_to_log_in(self):
+        save_config(SyncConfig(device_name="ПК"))
         with mock.patch.object(QMessageBox, "information") as info:
             self.settings.on_sync()
         info.assert_called_once()
@@ -391,7 +396,7 @@ class OfflineTest(SyncUiTestCase):
         self.assertIn(DIRTY, self._indicator())
 
     def test_indicator_hidden_without_config(self):
-        save_config(SyncConfig(login="", password=""))
+        save_config(SyncConfig())
         self.window.refresh_sync_indicator()
         self.assertFalse(self.window.sync_label.isVisibleTo(self.window))
         self.assertFalse(self.window.sync_btn.isVisibleTo(self.window))
@@ -408,13 +413,13 @@ class StartupCheckTest(SyncUiTestCase):
         self._wait(lambda: self.window._startup_check is None)
 
     def test_not_configured_does_nothing(self):
-        save_config(SyncConfig(login="", password=""))
+        save_config(SyncConfig())
         self._startup()
         self.assertEqual(self.server.requests, [])
 
-    def test_unreadable_password_is_reported(self):
-        config = SyncConfig(url=self.server.url, login="user", password="")
-        config.password_unreadable = True
+    def test_unreadable_token_is_reported(self):
+        config = SyncConfig(uid=self.server.uid)
+        config.token_unreadable = True
         with mock.patch("src.ui.main_window.load_config", return_value=config):
             self._startup()
         self.assertTrue(any("Синхронизация выключена" in title for title, _t in self.messages))
@@ -470,11 +475,10 @@ class StartupCheckTest(SyncUiTestCase):
         self._startup()
         self.assertTrue(any("ошибкой 500" in t for t in self._texts()))
 
-    def test_wrong_password_at_startup_is_shown(self):
-        self.config.password = "wrong"
-        save_config(self.config)
+    def test_revoked_token_at_startup_is_shown(self):
+        self.server.token = "other-token"
         self._startup()
-        self.assertTrue(any("логин или пароль" in t for t in self._texts()))
+        self.assertTrue(any("не принял вход" in t for t in self._texts()))
 
 
 class CloseWindowTest(SyncUiTestCase):
@@ -601,11 +605,11 @@ class VpnHintTest(SyncUiTestCase):
         self.assertTrue(all(not host.startswith("77.88.") for host, _port in sync_flow._PROBE_HOSTS))
 
     def test_network_error_text_mentions_vpn(self):
-        text = sync_flow.describe_error(WebDavError("x", None))
+        text = sync_flow.describe_error(YaDiskError("x", None))
         self.assertIn("VPN", text)
 
     def test_other_errors_do_not_blame_vpn(self):
-        for error in (WebDavError("x", 401), WebDavError("x", 507), WebDavError("x", 500),
+        for error in (YaDiskError("x", 401), YaDiskError("x", 507), YaDiskError("x", 500),
                       SyncError("плохо")):
             self.assertNotIn("VPN", sync_flow.describe_error(error))
 
@@ -666,7 +670,7 @@ class VpnHintTest(SyncUiTestCase):
     def test_unknown_connectivity_when_probe_is_cancelled(self):
         self.server.offline = True
         # synchronize падает сетевой ошибкой; проверку связи пользователь отменяет.
-        with mock.patch.object(sync_flow, "synchronize", side_effect=WebDavError("x", None)), \
+        with mock.patch.object(sync_flow, "synchronize", side_effect=YaDiskError("x", None)), \
                 mock.patch.object(sync_flow, "run_with_progress", side_effect=SyncCancelled()):
             self.window.sync_now()
         self.assertIsNone(self.ask_retry.call_args[0][2])
@@ -721,7 +725,7 @@ class StartupResultDeferralTest(SyncUiTestCase):
 
     def test_error_window_is_also_deferred_while_busy(self):
         self.window._sync_busy = True
-        self.window._handle_startup_result(WebDavError("x", 500), None)
+        self.window._handle_startup_result(YaDiskError("x", 500), None)
         self.assertEqual(self.messages, [])
         self.window._sync_busy = False
         self._wait(lambda: bool(self.messages))
@@ -766,22 +770,45 @@ class UnknownChangeStateTest(SyncUiTestCase):
 
 
 class SettingsIndicatorTest(SyncUiTestCase):
-    def test_save_shows_sidebar_panel_for_new_credentials(self):
-        save_config(SyncConfig(login="", password=""))
+    def _log_in(self):
+        """Вход по коду через локальный «Яндекс»: код сразу подтверждён."""
+        self._patch_value("src.yandex_oauth.OAUTH_URL", self.server.oauth_url)
+        self._patch_value("src.yandex_oauth.INFO_URL", self.server.info_url)
+        self._patch("src.yandex_oauth._client_secret", return_value="test-secret")
+        self.server.approved = True
+        self.settings.on_login()
+
+    def test_login_shows_sidebar_panel(self):
+        save_config(SyncConfig(device_name="ПК"))
+        self.settings._load()
         self.window.refresh_sync_indicator()
         self.assertFalse(self.window.sync_label.isVisibleTo(self.window))
-        self.settings.login_edit.setText("user")
-        self.settings.password_edit.setText("secret")
-        self.settings.on_save()
+        self._log_in()
+        config = load_config()
+        self.assertEqual((config.token, config.refresh_token, config.uid, config.login),
+                         (self.server.token, "refresh-1", self.server.uid, self.server.login))
+        self.assertGreater(config.token_expires_at, time.time())
+        self.assertIn("tester", self.settings.account_label.text())
         self.assertTrue(self.window.sync_label.isVisibleTo(self.window))
         self.assertTrue(self.window.sync_btn.isVisibleTo(self.window))
+        self.assertEqual(self.messages, [])
 
-    def test_save_hides_panel_when_credentials_are_cleared(self):
+    def test_login_failure_is_shown_and_nothing_saved(self):
+        save_config(SyncConfig(device_name="ПК"))
+        self._patch_value("src.yandex_oauth.OAUTH_URL", self.server.url + "/missing")
+        self.settings.on_login()
+        self.assertTrue(any("Вход в Яндекс" == title for title, _ in self.messages))
+        self.assertFalse(load_config().is_configured)
+
+    def test_logout_hides_panel_and_forgets_token(self):
         self.window.refresh_sync_indicator()
         self.assertTrue(self.window.sync_label.isVisibleTo(self.window))
-        self.settings.login_edit.setText("")
-        self.settings.on_save()
+        with mock.patch("src.ui.settings_screen.ask_yes_no", return_value=True):
+            self.settings.on_logout()
         self.assertFalse(self.window.sync_label.isVisibleTo(self.window))
+        config = load_config()
+        self.assertEqual((config.token, config.uid), ("", ""))
+        self.assertEqual(config.device_name, "ПК")
 
 
 class ReleaseDbTest(SyncUiTestCase):

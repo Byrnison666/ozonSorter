@@ -26,7 +26,7 @@ const online = async () => true;
 function ui(answers: { pull?: boolean; conflict?: 'local' | 'remote' | ''; emptyDisk?: boolean } = {}) {
   const asked: string[] = [];
   const impl: SyncUi = {
-    withProgress: (_t, fn) => fn(new CancelToken()),
+    withProgress: (_t, fn) => fn(new CancelToken(), () => undefined),
     askConflict: async () => {
       asked.push('conflict');
       return answers.conflict ?? '';

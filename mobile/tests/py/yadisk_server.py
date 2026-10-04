@@ -1,8 +1,9 @@
-"""Тестовый WebDAV-сервер ПК (tests/webdav_fake.py) отдельным процессом.
+"""Тестовый «Яндекс.Диск» ПК (tests/yadisk_fake.py) отдельным процессом.
 
-Первая строка stdout — JSON {"url", "control"}. Управление — POST JSON на
-control: put/get/delete/list файлов «Диска», флаги offline/truncate_gets,
-fail_next, clear. Работает, пока открыт stdin.
+Первая строка stdout — JSON {"url", "api_url", "oauth_url", "info_url", "control"}.
+Управление — POST JSON на control: put/get/delete/list файлов «Диска», флаги
+offline/truncate_gets/async_ops/approved/token, fail_next, requests, auth_seen, clear.
+Работает, пока открыт stdin.
 """
 import base64
 import json
@@ -12,16 +13,19 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.join(os.getcwd(), "tests"))
-from webdav_fake import FakeWebDavServer  # noqa: E402
+from yadisk_fake import FakeYaDiskServer  # noqa: E402
 
-dav = FakeWebDavServer()
+dav = FakeYaDiskServer()
 
 
 def handle(cmd):
     op = cmd["cmd"]
     if op == "put":
         path = cmd["path"]
-        dav.dirs.add(path.rsplit("/", 1)[0] or "/")
+        # Все папки по пути, как если бы их создал клиент.
+        parts = path.split("/")[1:-1]
+        for i in range(len(parts)):
+            dav.dirs.add("/" + "/".join(parts[:i + 1]))
         dav.files[path] = base64.b64decode(cmd["b64"])
     elif op == "get":
         data = dav.files.get(cmd["path"])
@@ -31,14 +35,22 @@ def handle(cmd):
     elif op == "list":
         return {"files": sorted(dav.files)}
     elif op == "set":
-        for key in ("offline", "truncate_gets"):
+        for key in ("offline", "truncate_gets", "async_ops", "approved", "token"):
             if key in cmd:
                 setattr(dav, key, cmd[key])
     elif op == "fail_next":
         dav.fail_next[cmd["method"]] = cmd["code"]
+    elif op == "auth_seen":
+        return {"auth": list(dav.auth_seen)}
+    elif op == "requests":
+        return {"requests": [list(r) for r in dav.requests]}
     elif op == "clear":
         dav.files.clear()
         dav.dirs = {"/"}
+        dav.requests.clear()
+        dav.auth_seen.clear()
+        dav.fail_next.clear()
+        dav.approved = False
     else:
         raise ValueError(op)
     return {}
@@ -60,8 +72,9 @@ class Control(BaseHTTPRequestHandler):
 
 control = ThreadingHTTPServer(("127.0.0.1", 0), Control)
 threading.Thread(target=control.serve_forever, daemon=True).start()
-print(json.dumps({"url": dav.url, "control": "http://127.0.0.1:%d" % control.server_address[1]}),
-      flush=True)
+print(json.dumps({"url": dav.url, "api_url": dav.api_url, "oauth_url": dav.oauth_url,
+                  "info_url": dav.info_url,
+                  "control": "http://127.0.0.1:%d" % control.server_address[1]}), flush=True)
 sys.stdin.read()  # до закрытия stdin тестом
 control.shutdown()
 dav.stop()

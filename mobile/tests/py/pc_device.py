@@ -1,6 +1,6 @@
 """«ПК» в перекрёстных тестах синхронизации: настоящий SyncService ПК.
 
-argv: папка устройства, адрес WebDAV, команда, [аргумент].
+argv: папка устройства, адрес REST API Диска, команда, [аргумент].
 Команды: init, add_client <id>, client_ids, check, push, pull, local_changed,
 sha, reopen (открыть базу, как при запуске программы). Печатает JSON.
 """
@@ -12,12 +12,12 @@ import sys
 from src.database import DatabaseManager
 from src.models import Client, DeliveryPoint
 from src.sync_service import SyncService
-from src.webdav import WebDavClient
+from src.yadisk_api import YaDiskClient
 
-device_dir, url, cmd = sys.argv[1:4]
+device_dir, api_url, cmd = sys.argv[1:4]
 arg = sys.argv[4] if len(sys.argv) > 4 else None
 db_path = os.path.join(device_dir, "ozon_sorter.db")
-sync = SyncService(db_path, WebDavClient(url, "user", "secret", timeout=5), "OzonSorter",
+sync = SyncService(db_path, YaDiskClient("test-token", api_url, timeout=5), "OzonSorter",
                    os.path.join(device_dir, "sync_state.json"), "ПК", target_id="t1")
 
 

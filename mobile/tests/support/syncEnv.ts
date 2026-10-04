@@ -1,6 +1,6 @@
 /**
- * Окружение перекрёстных тестов синхронизации: общий тестовый WebDAV-сервер
- * ПК, «ПК» (настоящий SyncService на Python) и «телефон» (SyncService на TS).
+ * Окружение перекрёстных тестов синхронизации: общий тестовый «Яндекс.Диск»
+ * ПК (tests/yadisk_fake.py), «ПК» (настоящий SyncService на Python) и «телефон» (SyncService на TS).
  */
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
@@ -14,7 +14,8 @@ import { configureConnection, ensureSchema } from '../../src/core/schema';
 import {
   type LocalFiles, type SyncDeps, SyncService, type SyncOptions,
 } from '../../src/core/sync/syncService';
-import { fetchTransport, type Transport, WebDavClient } from '../../src/core/sync/webdav';
+import { type Transport, YaDiskClient } from '../../src/core/sync/yadisk';
+import { fetchTransport } from './fetchTransport';
 import { openBunDb } from './bunDb';
 import { PY_SCRIPTS, PYTHON, pythonEnv, REPO_ROOT, runPythonScript } from './pc';
 
@@ -23,6 +24,9 @@ export const META_PATH = `/${REMOTE_DIR}/meta.json`;
 
 export interface DavServer {
   url: string;
+  apiUrl: string;
+  oauthUrl: string;
+  infoUrl: string;
   control<T = Record<string, unknown>>(cmd: Record<string, unknown>): Promise<T>;
   /** Положить файл на «Диск» в обход клиентов (как мог бы кто угодно с доступом). */
   put(path: string, data: Uint8Array | string): Promise<void>;
@@ -32,18 +36,19 @@ export interface DavServer {
 }
 
 export async function startDavServer(): Promise<DavServer> {
-  const proc = Bun.spawn([PYTHON, join(PY_SCRIPTS, 'webdav_server.py')], {
+  const proc = Bun.spawn([PYTHON, join(PY_SCRIPTS, 'yadisk_server.py')], {
     cwd: REPO_ROOT, env: pythonEnv(), stdin: 'pipe', stdout: 'pipe', stderr: 'inherit',
   });
   const reader = proc.stdout.getReader();
   let text = '';
   while (!text.includes('\n')) {
     const { value, done } = await reader.read();
-    if (done) throw new Error('webdav_server.py exited before start');
+    if (done) throw new Error('yadisk_server.py exited before start');
     text += new TextDecoder().decode(value);
   }
   reader.releaseLock();
-  const { url, control: controlUrl } = JSON.parse(text.split('\n')[0]);
+  const { url, api_url: apiUrl, oauth_url: oauthUrl, info_url: infoUrl, control: controlUrl } =
+    JSON.parse(text.split('\n')[0]);
   const control = async <T>(cmd: Record<string, unknown>): Promise<T> => {
     const r = await fetch(controlUrl, {
       method: 'POST', body: JSON.stringify(cmd), headers: { Connection: 'close' },
@@ -52,6 +57,9 @@ export async function startDavServer(): Promise<DavServer> {
   };
   return {
     url,
+    apiUrl,
+    oauthUrl,
+    infoUrl,
     control,
     async put(path, data) {
       const bytes = typeof data === 'string' ? new TextEncoder().encode(data) : data;
@@ -76,7 +84,7 @@ export async function startDavServer(): Promise<DavServer> {
  * ответа, а fetch Bun иногда берёт его из пула повторно — ECONNRESET. Отказ от
  * keep-alive убирает гонку; к телефону и Яндекс.Диску это не относится.
  */
-const testTransport: Transport = {
+export const testTransport: Transport = {
   request: (req) => fetchTransport.request({ ...req, headers: { ...req.headers, Connection: 'close' } }),
 };
 
@@ -127,7 +135,7 @@ export class Phone {
     this.dbPath = join(dir, 'ozon_sorter.db');
     this.sync = new SyncService(deps, {
       dbPath: this.dbPath,
-      client: new WebDavClient(server.url, 'user', 'secret', testTransport, 5_000),
+      client: new YaDiskClient('test-token', server.apiUrl, testTransport, 5_000),
       remoteDir: REMOTE_DIR,
       statePath: join(dir, 'sync_state.json'),
       deviceName: 'Телефон',
@@ -179,7 +187,7 @@ export class Pc {
   constructor(readonly dir: string, readonly server: DavServer) {}
 
   run<T = unknown>(cmd: string, arg?: string): T {
-    const args = [this.dir, this.server.url, cmd, ...(arg === undefined ? [] : [arg])];
+    const args = [this.dir, this.server.apiUrl, cmd, ...(arg === undefined ? [] : [arg])];
     return JSON.parse(runPythonScript('pc_device.py', ...args)) as T;
   }
 

@@ -1,7 +1,7 @@
 /**
  * Сценарий синхронизации с диалогами (перенос ключевых случаев
  * tests/test_sync_ui_flow.py ПК): фейковый интерфейс, настоящий SyncService
- * и общий тестовый WebDAV-сервер.
+ * и общий тестовый «Яндекс.Диск».
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { mkdirSync, writeFileSync } from 'node:fs';
@@ -11,6 +11,7 @@ import {
   backgroundPush, type DbHost, startupAction, syncInteractive, synchronize, type SyncUi, texts,
 } from '../src/core/sync/flow';
 import { CancelToken, SyncCancelled, type SyncCheck } from '../src/core/sync/syncService';
+import type { Progress } from '../src/core/sync/yadisk';
 import { tempDir } from './support/pc';
 import { type DavServer, Phone, startDavServer } from './support/syncEnv';
 
@@ -24,10 +25,13 @@ class FakeUi implements SyncUi {
   messages: Array<[string, string]> = [];
   onRetry?: () => Promise<void>;
 
-  async withProgress<T>(text: string, fn: (t: CancelToken) => Promise<T>): Promise<T> {
+  transfers: Record<string, Array<[number, number]>> = {};
+
+  async withProgress<T>(text: string, fn: (t: CancelToken, p: Progress) => Promise<T>): Promise<T> {
     this.calls.push(`progress:${text}`);
     if (this.cancelAt === text) throw new SyncCancelled();
-    return fn(new CancelToken());
+    const log: Array<[number, number]> = (this.transfers[text] = []);
+    return fn(new CancelToken(), (done, total) => log.push([done, total]));
   }
   async askConflict(check: SyncCheck) {
     this.calls.push(`conflict:${texts.conflict(check)}`);
@@ -199,10 +203,26 @@ describe('синхронизация с диалогами', () => {
     expect(ui.messages).toEqual([]);
   });
 
-  test('ошибка авторизации — сообщение про логин и пароль', async () => {
-    await server.control({ cmd: 'fail_next', method: 'GET', code: 401 });
-    expect(await syncInteractive(a.sync, host, ui, online)).toBe(false);
-    expect(ui.messages[0]).toEqual(['error', expect.stringContaining('логин или пароль') as unknown as string]);
+  test('отозванный токен — сообщение войти заново', async () => {
+    await server.control({ cmd: 'set', token: 'other-token' });
+    try {
+      expect(await syncInteractive(a.sync, host, ui, online)).toBe(false);
+    } finally {
+      await server.control({ cmd: 'set', token: 'test-token' });
+    }
+    expect(ui.messages[0]).toEqual(['error', expect.stringContaining('Войдите в Яндекс заново') as unknown as string]);
+  });
+
+  test('выгрузка и загрузка показывают ход передачи', async () => {
+    a.addClient('1');
+    await synchronize(a.sync, host, ui);
+    const up = ui.transfers['Выгрузка базы на Яндекс.Диск…'];
+    expect(up.length).toBeGreaterThan(0);
+    await synchronize(b.sync, host, ui);
+    const down = ui.transfers['Загрузка базы с Яндекс.Диска…'];
+    expect(down[down.length - 1]).toEqual(up[up.length - 1]);
+    // Проверка Диска передачи файла базы не показывает.
+    expect(ui.transfers['Проверка Яндекс.Диска…']).toEqual([]);
   });
 
   test('ручной запуск сообщает об успехе, автоматический — нет', async () => {

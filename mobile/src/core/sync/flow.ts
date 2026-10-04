@@ -6,7 +6,8 @@
 import {
   CancelToken, SyncCancelled, type SyncCheck, SyncError, SyncService, SyncStatus,
 } from './syncService';
-import { WebDavError } from './webdav';
+import { type Progress, YaDiskError } from './yadisk';
+import { OAuthError } from './yandexOAuth';
 
 // Через VPN Яндекс.Диск обычно недоступен: запросы либо падают, либо висят.
 export const VPN_HINT =
@@ -22,8 +23,12 @@ export interface SyncResult {
 export const inSync = (r: SyncResult) => r.outcome !== 'DECLINED';
 
 export interface SyncUi {
-  /** Выполнить fn под модальным индикатором с «Отменой». Отмена — SyncCancelled. */
-  withProgress<T>(text: string, fn: (token: CancelToken) => Promise<T>): Promise<T>;
+  /**
+   * Выполнить fn под модальным индикатором с «Отменой». Отмена — SyncCancelled.
+   * Через onProgress fn сообщает ход передачи файла — индикатор показывает
+   * объём, долю и скорость.
+   */
+  withProgress<T>(text: string, fn: (token: CancelToken, onProgress: Progress) => Promise<T>): Promise<T>;
   /** Какую версию оставить: 'local', 'remote' или '' (отмена). */
   askConflict(check: SyncCheck): Promise<'local' | 'remote' | ''>;
   askPull(check: SyncCheck): Promise<boolean>;
@@ -41,9 +46,12 @@ export interface DbHost {
 }
 
 export function describeError(error: unknown): string {
-  if (error instanceof WebDavError) {
+  if (error instanceof YaDiskError) {
     if (error.isAuthError) {
-      return 'Яндекс.Диск не принял логин или пароль приложения. Проверьте их в «Настройках».';
+      return 'Яндекс.Диск не принял вход: доступ отозван или истёк. Войдите в Яндекс заново в «Настройках».';
+    }
+    if (error.isTlsError) {
+      return 'Не удалось проверить защищённое соединение с Яндекс.Диском. Проверьте дату и время на телефоне.';
     }
     if (error.isNetworkError) return `Нет связи с Яндекс.Диском. Проверьте интернет и повторите.\n${VPN_HINT}`;
     if (error.status === 507) return 'На Яндекс.Диске закончилось место.';
@@ -53,9 +61,33 @@ export function describeError(error: unknown): string {
   return `Не удалось выполнить синхронизацию:\n${(error as Error)?.message ?? String(error)}`;
 }
 
+/** Текст ошибки входа в Яндекс — как describe_login_error ПК. */
+export function describeLoginError(error: unknown): string {
+  if (error instanceof OAuthError) {
+    if (error.code === 'expired_token') return 'Код устарел. Нажмите «Войти в Яндекс» ещё раз.';
+    if (error.code === 'access_denied') return 'Вход отклонён на странице Яндекса.';
+    if (error.code === 'not_configured') return 'В этой сборке приложения не настроен вход в Яндекс.';
+    return `Яндекс не выполнил вход (${error.code || error.message}). Повторите позже.`;
+  }
+  if (error instanceof YaDiskError) {
+    if (error.isTlsError) {
+      return 'Не удалось проверить защищённое соединение с Яндексом. Проверьте дату и время на телефоне.';
+    }
+    if (error.isNetworkError) return 'Нет связи с Яндексом. Проверьте интернет (и отключите VPN) и повторите.';
+    return `Яндекс ответил ошибкой ${error.status}. Повторите позже.`;
+  }
+  return `Не удалось войти в Яндекс:\n${(error as Error)?.message ?? String(error)}`;
+}
+
 function describeRemote(check: SyncCheck): string {
   const meta = check.meta!;
   return `устройство «${meta.device || '—'}», сохранена ${formatTime(meta.saved_at)}`;
+}
+
+/** Размер для оператора: «850 КБ», «3,4 МБ» — как на ПК. */
+export function formatSize(size: number): string {
+  if (size < 1024 * 1024) return `${Math.round(Math.max(size, 0) / 1024)} КБ`;
+  return `${(size / (1024 * 1024)).toFixed(1).replace('.', ',')} МБ`;
 }
 
 /** '2026-09-30 14:05:00' → '30.09.2026 14:05'; пустое — '—'. */
@@ -115,7 +147,7 @@ export const texts = {
 /**
  * Один проход: проверить Диск и выложить либо загрузить базу. confirmPull —
  * спрашивать перед загрузкой (автоматические запуски).
- * Бросает WebDavError, SyncError, SyncCancelled.
+ * Бросает YaDiskError, SyncError, SyncCancelled.
  */
 export async function synchronize(
   service: SyncService, host: DbHost, ui: SyncUi, confirmPull = false,
@@ -139,11 +171,11 @@ export async function synchronize(
     }
 
     if (status === SyncStatus.LOCAL_AHEAD) {
-      const rev = await ui.withProgress('Выгрузка базы на Яндекс.Диск…', (t) => service.push(check.meta, t));
+      const rev = await ui.withProgress('Выгрузка базы на Яндекс.Диск…', (t, p) => service.push(check.meta, t, p));
       return { outcome: 'PUSHED', text: `Изменения выложены на Яндекс.Диск (ревизия ${rev}).` };
     }
 
-    const rev = await ui.withProgress('Загрузка базы с Яндекс.Диска…', (t) => service.pull(check.meta, t));
+    const rev = await ui.withProgress('Загрузка базы с Яндекс.Диска…', (t, p) => service.pull(check.meta, t, p));
     try {
       host.reload();
       reloaded = true;
@@ -218,7 +250,7 @@ export async function syncInteractive(
       result = await synchronize(service, host, ui, confirmPull);
     } catch (e) {
       if (e instanceof SyncCancelled) return false;
-      if (e instanceof WebDavError && e.isNetworkError) {
+      if (e instanceof YaDiskError && e.isNetworkError) {
         if (await ui.askRetryOffline((await hasLocalChanges(service)) === true, await probe())) {
           wasOffline = true;
           continue;
@@ -244,7 +276,7 @@ export async function startupAction(service: SyncService): Promise<StartupAction
   try {
     check = await service.check();
   } catch (e) {
-    if (e instanceof WebDavError && e.isNetworkError) {
+    if (e instanceof YaDiskError && e.isNetworkError) {
       // Без интернета молчим, пока выкладывать нечего.
       return (await hasLocalChanges(service)) === true
         ? { kind: 'sync', announce: false, assumeOffline: true }
@@ -277,4 +309,40 @@ export async function backgroundPush(service: SyncService, host: DbHost): Promis
     console.warn('Background push failed', e);
     return null;
   }
+}
+
+/** Скорость, ниже которой передача считается медленной (байт/с), — как на ПК. */
+export const SLOW_SPEED = 64 * 1024;
+const SPEED_WINDOW_MS = 3000;
+
+/**
+ * Скорость передачи за последние 3 с по отчётам onProgress. Пока данных
+ * мало — 0.
+ */
+export class SpeedMeter {
+  private samples: Array<[number, number]> = [];
+
+  add(done: number, now = Date.now()): void {
+    this.samples.push([now, done]);
+    while (this.samples.length > 2 && now - this.samples[0][0] > SPEED_WINDOW_MS) this.samples.shift();
+  }
+
+  get hasData(): boolean {
+    return this.samples.length > 0;
+  }
+
+  /** Байт в секунду. */
+  get speed(): number {
+    if (this.samples.length < 2) return 0;
+    const [t0, d0] = this.samples[0];
+    const [t1, d1] = this.samples[this.samples.length - 1];
+    return t1 > t0 ? ((d1 - d0) * 1000) / (t1 - t0) : 0;
+  }
+}
+
+/** «1,2 МБ из 3,4 МБ · 450 КБ/с»; total 0 — размер неизвестен. */
+export function transferText(done: number, total: number, speed: number): string {
+  let text = total ? `${formatSize(done)} из ${formatSize(total)}` : formatSize(done);
+  if (speed > 0) text += ` · ${formatSize(speed)}/с`;
+  return text;
 }

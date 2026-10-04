@@ -4,6 +4,7 @@
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import { gzipSync } from 'fflate';
 
@@ -13,7 +14,7 @@ import { configureConnection, ensureSchema, SCHEMA_VERSION } from '../src/core/s
 import {
   CancelToken, parseMeta, SyncCancelled, SyncError, type SyncDeps,
 } from '../src/core/sync/syncService';
-import { WebDavError } from '../src/core/sync/webdav';
+import { YaDiskError } from '../src/core/sync/yadisk';
 import { openBunDb } from './support/bunDb';
 import { tempDir } from './support/pc';
 import {
@@ -228,7 +229,7 @@ describe('обмен и отказы', () => {
   test('сервер недоступен — сетевая ошибка', async () => {
     await server.control({ cmd: 'set', offline: true });
     const err = await a.sync.check().catch((e) => e);
-    expect(err).toBeInstanceOf(WebDavError);
+    expect(err).toBeInstanceOf(YaDiskError);
     expect(err.isNetworkError).toBe(true);
   });
 
@@ -237,14 +238,14 @@ describe('обмен и отказы', () => {
     await a.push();
     await server.control({ cmd: 'set', truncate_gets: true });
     const err = await b.sync.check().catch((e) => e);
-    expect(err).toBeInstanceOf(WebDavError);
+    expect(err).toBeInstanceOf(YaDiskError);
     expect(err.isNetworkError).toBe(true);
   });
 
-  test('сервер не принял пароль — ошибка авторизации', async () => {
+  test('Диск не принял токен — ошибка авторизации', async () => {
     await server.control({ cmd: 'fail_next', method: 'GET', code: 401 });
     const err = await a.sync.check().catch((e) => e);
-    expect(err).toBeInstanceOf(WebDavError);
+    expect(err).toBeInstanceOf(YaDiskError);
     expect(err.isAuthError).toBe(true);
   });
 
@@ -285,7 +286,7 @@ describe('ежедневные копии на Диске', () => {
 
   test('сбой копии не роняет выгрузку', async () => {
     a.addClient('1');
-    await server.control({ cmd: 'fail_next', method: 'PROPFIND', code: 500 });
+    await server.control({ cmd: 'fail_next', method: 'POST', code: 500 });
     expect(await a.push()).toBe(1);
     expect(await a.sync.localChanged()).toBe(false);
   });
@@ -365,7 +366,7 @@ describe('недоверенное содержимое Диска', () => {
   test('слишком большой meta.json', async () => {
     await publish(dbBytes());
     await server.put(META_PATH, ' '.repeat(70 * 1024));
-    await expect(b.sync.remoteMeta()).rejects.toBeInstanceOf(WebDavError);
+    await expect(b.sync.remoteMeta()).rejects.toBeInstanceOf(YaDiskError);
   });
 
   test('meta.json не JSON', () => rejects(async () => {
@@ -423,5 +424,104 @@ describe('зависимости платформы', () => {
     await p.push();
     const meta = JSON.parse(new TextDecoder().decode((await server.get(META_PATH))!));
     expect(meta.saved_at).toBe('2026-09-30 07:08:09');
+  });
+});
+
+describe('обмен через REST API Диска', () => {
+  /** Клиенты со случайными именами: база, которая после gzip больше 64 КБ. */
+  function addIncompressible(p: Phone, count: number) {
+    p.open((db) => db.transaction(() => {
+      for (let i = 0; i < count; i++) {
+        db.run(
+          "INSERT INTO clients (ozon_client_id, full_name, is_active, created_at, updated_at) VALUES (?, ?, 1, 'x', 'x')",
+          [String(100_000 + i), randomBytes(48).toString('hex')],
+        );
+      }
+    }));
+  }
+
+  const requests = async () => (await server.control<{ requests: [string, string][] }>({ cmd: 'requests' })).requests;
+
+  test('большая база выгружается под временным именем и переименовывается', async () => {
+    addIncompressible(a, 1500);
+    await a.push();
+    const reqs = await requests();
+    expect(reqs).toContainEqual(['POST', '/v1/disk/resources/move']);
+    const files = await server.list();
+    expect(files.some((f) => f.endsWith('.tmp'))).toBe(false);
+    await b.pull();
+    expect(b.clientIds().length).toBe(1500);
+  });
+
+  test('ежедневная копия делается копированием на Диске, без повторной выгрузки', async () => {
+    a.addClient('1');
+    await a.push();
+    const reqs = await requests();
+    expect(reqs).toContainEqual(['POST', '/v1/disk/resources/copy']);
+    // Выгружены только файл ревизии и meta.json.
+    expect(reqs.filter(([m, p]) => m === 'PUT' && p.startsWith('/upload/')).length).toBe(2);
+    const files = await server.list();
+    expect(files.filter((f) => f.startsWith(`/${REMOTE_DIR}/backups/`)).length).toBe(1);
+  });
+
+  test('копия за день уже есть — вторая выгрузка её не заменяет', async () => {
+    a.addClient('1');
+    await a.push();
+    const backup = (await server.list()).find((f) => f.includes('/backups/'))!;
+    const first = await server.get(backup);
+    a.addClient('2');
+    await a.push();
+    expect(await server.get(backup)).toEqual(first);
+  });
+
+  test('фоновые операции Диска дожидаются', async () => {
+    await server.control({ cmd: 'set', async_ops: true });
+    try {
+      addIncompressible(a, 1500);
+      expect(await a.push()).toBe(1);
+      await b.pull();
+      expect(b.clientIds().length).toBe(1500);
+    } finally {
+      await server.control({ cmd: 'set', async_ops: false });
+    }
+  });
+
+  test('ход выгрузки и загрузки сообщается', async () => {
+    addIncompressible(a, 300);
+    const up: Array<[number, number]> = [];
+    await a.sync.push((await a.sync.check()).meta, new CancelToken(), (d, t) => up.push([d, t]));
+    expect(up.length).toBeGreaterThan(0);
+    const [lastUp, totalUp] = up[up.length - 1];
+    expect(lastUp).toBe(totalUp);
+    expect(totalUp).toBeGreaterThan(0);
+
+    const down: Array<[number, number]> = [];
+    await b.sync.pull((await b.sync.check()).meta, new CancelToken(), (d, t) => down.push([d, t]));
+    expect(down.length).toBeGreaterThan(0);
+    expect(down[down.length - 1]).toEqual([totalUp, totalUp]);
+  });
+
+  test('папка синхронизации — корень папки приложения', async () => {
+    const p = new Phone(freshDir('root-a'), server, { remoteDir: '' });
+    const q = new Phone(freshDir('root-b'), server, { remoteDir: '' });
+    p.open(() => undefined);
+    q.open(() => undefined);
+    p.addClient('42');
+    await p.push();
+    const files = await server.list();
+    expect(files).toContain('/meta.json');
+    expect(files.some((f) => /^\/ozon_sorter_rev000001_[0-9a-f]{8}\.db\.gz$/.test(f))).toBe(true);
+    expect(files.some((f) => /^\/backups\/ozon_sorter_\d{4}-\d\d-\d\d\.db\.gz$/.test(f))).toBe(true);
+    await q.pull();
+    expect(q.clientIds()).toEqual(['42']);
+  });
+
+  test('токен не уходит на ссылки выгрузки и скачивания', async () => {
+    a.addClient('1');
+    await a.push();
+    await b.pull();
+    const { auth } = await server.control<{ auth: (string | null)[] }>({ cmd: 'auth_seen' });
+    expect(auth.length).toBeGreaterThan(0);
+    expect(auth.every((h) => h === null)).toBe(true);
   });
 });

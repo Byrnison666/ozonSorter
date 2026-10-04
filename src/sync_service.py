@@ -1,4 +1,4 @@
-"""Синхронизация базы через WebDAV (Яндекс.Диск): обмен целым файлом SQLite.
+"""Синхронизация базы через Яндекс.Диск (REST API): обмен целым файлом SQLite.
 
 Рассчитано на работу по очереди: перед работой скачать, после — выложить.
 Слияния нет; если изменены обе стороны, это конфликт, и пользователь выбирает
@@ -6,7 +6,7 @@
 указывает на текущую: переключение ревизии — одна запись маленького файла.
 
 Всё, что приходит с Диска, считается недоверенным: к папке имеет доступ любой,
-у кого есть аккаунт или пароль приложения. Поэтому meta.json разбирается
+у кого есть доступ к аккаунту. Поэтому meta.json разбирается
 строго, а скачанная база проверяется до того, как заменит рабочую.
 """
 import gzip
@@ -28,7 +28,7 @@ from typing import Optional
 
 from .database import SCHEMA_VERSION
 from .models import Base
-from .webdav import WebDavClient, WebDavError
+from .yadisk_api import Progress, YaDiskClient, YaDiskError
 
 META_NAME = "meta.json"
 KEEP_REMOTE_REVISIONS = 5
@@ -208,7 +208,7 @@ def _validate_database(path: str) -> None:
 
 
 class SyncService:
-    def __init__(self, db_path: str, client: WebDavClient, remote_dir: str,
+    def __init__(self, db_path: str, client: YaDiskClient, remote_dir: str,
                  state_path: str, device_name: str,
                  transfer_timeout: Optional[float] = None, target_id: str = ""):
         self.db_path = db_path
@@ -218,7 +218,7 @@ class SyncService:
         self.device_name = device_name
         # Передача файла базы идёт дольше служебных запросов.
         self.transfer_timeout = transfer_timeout
-        # К чему относится сохранённое состояние (сервер, аккаунт, папка). После
+        # К чему относится сохранённое состояние (аккаунт, папка). После
         # смены настроек старое состояние к новому месту неприменимо.
         self.target_id = target_id
         self._rollback = None
@@ -301,8 +301,12 @@ class SyncService:
         Пустая база правкой не считается: выкладывать её поверх Диска незачем."""
         return local_sha != base_sha and not self._local_is_empty()
 
+    def _remote(self, *names: str) -> str:
+        """Путь на Диске внутри папки синхронизации (она может быть корнем app:/)."""
+        return "/".join(n for n in (self.remote_dir, *names) if n)
+
     def remote_meta(self) -> Optional[RemoteMeta]:
-        raw = self.client.get(f"{self.remote_dir}/{META_NAME}", max_bytes=_MAX_META_BYTES)
+        raw = self.client.get(self._remote(META_NAME), max_bytes=_MAX_META_BYTES)
         if raw is None:
             return None
         try:
@@ -353,7 +357,8 @@ class SyncService:
         return SyncCheck(status, meta, remote_is_older=rewound, local_synced_at=state["synced_at"],
                          never_synced=state["base_rev"] == 0)
 
-    def push(self, expected: Optional[RemoteMeta], token: Optional[CancelToken] = None) -> int:
+    def push(self, expected: Optional[RemoteMeta], token: Optional[CancelToken] = None,
+             progress: Optional[Progress] = None) -> int:
         """Выложить локальную базу новой ревизией. Возвращает номер ревизии.
 
         expected — ревизия Диска, по которой принималось решение (SyncCheck.meta).
@@ -389,7 +394,8 @@ class SyncService:
         # Сначала данные, потом meta.json: оборванная выгрузка оставит на Диске
         # лишний файл, но текущая ревизия останется прежней и целой.
         packed = gzip.compress(raw, 6)
-        self.client.put(f"{self.remote_dir}/{name}", packed, timeout=self.transfer_timeout)
+        self.client.put(self._remote(name), packed, timeout=self.transfer_timeout,
+                        progress=progress)
         (token or CancelToken()).commit()
         if not _same_revision(self.remote_meta(), expected):
             raise SyncError(
@@ -401,27 +407,29 @@ class SyncService:
             "device": self.device_name,
             "saved_at": datetime.now().strftime(SAVED_AT_FORMAT),
         }
-        self.client.put(f"{self.remote_dir}/{META_NAME}",
+        self.client.put(self._remote(META_NAME),
                         json.dumps(new_meta, ensure_ascii=False).encode("utf-8"))
         self._remember(rev, sha)
-        self._daily_backup(packed)
+        self._daily_backup(name)
         self._prune_remote(rev)
         return rev
 
-    def _daily_backup(self, packed: bytes) -> None:
-        """Первая выгрузка за день кладёт копию в backups/; хранится
-        KEEP_DAILY_BACKUPS последних. Сбой — не сбой выгрузки."""
-        folder = f"{self.remote_dir}/{BACKUP_DIR}"
+    def _daily_backup(self, revision: str) -> None:
+        """Первая выгрузка за день кладёт копию ревизии в backups/ (копированием
+        на Диске, без повторной передачи); хранится KEEP_DAILY_BACKUPS последних.
+        Сбой — не сбой выгрузки."""
+        folder = self._remote(BACKUP_DIR)
         name = f"ozon_sorter_{datetime.now().strftime('%Y-%m-%d')}.db.gz"
         try:
             existing = sorted(n for n in self.client.list_dir(folder) if _DAILY_RE.fullmatch(n))
             if name not in existing:
                 self.client.ensure_dir(folder)
-                self.client.put(f"{folder}/{name}", packed, timeout=self.transfer_timeout)
+                self.client.copy(self._remote(revision), f"{folder}/{name}",
+                                 timeout=self.transfer_timeout)
                 existing = sorted(existing + [name])
             for old in existing[:-KEEP_DAILY_BACKUPS]:
                 self.client.delete(f"{folder}/{old}")
-        except WebDavError:
+        except YaDiskError:
             pass  # выгрузка уже состоялась; копию сделает следующая
 
     def _prune_remote(self, current_rev: int) -> None:
@@ -430,13 +438,14 @@ class SyncService:
             for name in self.client.list_dir(self.remote_dir):
                 match = _REVISION_RE.fullmatch(name)
                 if match and int(match.group(1)) <= current_rev - KEEP_REMOTE_REVISIONS:
-                    self.client.delete(f"{self.remote_dir}/{name}")
-        except WebDavError:
+                    self.client.delete(self._remote(name))
+        except YaDiskError:
             # Выгрузка уже состоялась; лишние старые файлы уберёт следующая.
             pass
 
     def pull(self, expected: Optional[RemoteMeta] = None,
-             token: Optional[CancelToken] = None) -> int:
+             token: Optional[CancelToken] = None,
+             progress: Optional[Progress] = None) -> int:
         """Заменить локальную базу версией с Диска. Возвращает номер ревизии.
 
         expected — ревизия, которую пользователю показали и которую он согласился
@@ -454,8 +463,8 @@ class SyncService:
                 "База на Диске создана более новой версией программы. "
                 "Обновите программу на этом устройстве."
             )
-        packed = self.client.get(f"{self.remote_dir}/{meta.file}",
-                                 timeout=self.transfer_timeout, max_bytes=MAX_DB_BYTES)
+        packed = self.client.get(self._remote(meta.file), timeout=self.transfer_timeout,
+                                 max_bytes=MAX_DB_BYTES, progress=progress)
         if packed is None:
             raise SyncError(f"На Диске нет файла базы, на который ссылается {META_NAME}.")
         raw = self._unpack(packed)

@@ -1,6 +1,6 @@
 /**
  * Обмен базой между ПК (настоящий SyncService на Python) и телефоном через
- * общий тестовый WebDAV-сервер: протокол на Диске должен совпадать.
+ * общий тестовый «Яндекс.Диск» (tests/yadisk_fake.py): протокол на Диске должен совпадать.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';

@@ -8,3 +8,4 @@ dist/
 !OzonSorter.spec
 *.db
 *.db.bak
+src/_yandex_secret.py

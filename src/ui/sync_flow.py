@@ -4,21 +4,24 @@
 это время трогать нельзя.
 """
 import socket
+import time
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from typing import Optional
 
-from PySide2.QtCore import Qt, QThread, QTimer
+from PySide2.QtCore import QObject, Qt, QThread, QTimer, Signal
 from PySide2.QtWidgets import (
     QDialog, QHBoxLayout, QLabel, QMessageBox, QProgressBar, QPushButton, QVBoxLayout,
 )
 
-from src.sync_config import STATE_PATH, SyncConfig
+from src.sync_config import STATE_PATH, SyncConfig, save_config
 from src.sync_service import (
     SAVED_AT_FORMAT, CancelToken, SyncCancelled, SyncError, SyncService, SyncStatus,
 )
-from src.webdav import WebDavClient, WebDavError
+from src.yadisk_api import YaDiskClient, YaDiskError
+from src.yandex_oauth import OAuthError, refresh_tokens
 
 # Служебные запросы маленькие; передача файла базы может идти долго. Оба
 # таймаута — на одну сетевую операцию, а не на весь обмен.
@@ -34,6 +37,13 @@ _abandoned = set()
 VPN_HINT = ("Если на компьютере включён VPN, отключите его: с включённым VPN "
             "Яндекс.Диск обычно недоступен.")
 _SLOW_HINT_MS = 10_000
+# Передача быстрее этого (байт/с) медленной не считается — подсказку про VPN не показываем.
+_SLOW_SPEED = 64 * 1024
+# Окно, по которому считается скорость передачи, и как часто обновлять индикатор.
+_SPEED_WINDOW = 3.0
+_PROGRESS_INTERVAL = 0.1
+# Токен действует год; обновляем его за месяц до конца.
+_REFRESH_BEFORE = 30 * 24 * 3600
 # Любые два адреса, не связанные с Яндексом: если они отвечают, а Яндекс нет —
 # проблема именно в доступе к Яндексу (чаще всего VPN).
 _PROBE_HOSTS = (("1.1.1.1", 443), ("8.8.8.8", 443))
@@ -57,16 +67,38 @@ class SyncResult:
 
 
 def make_sync_service(config: SyncConfig, db_path: str) -> SyncService:
-    client = WebDavClient(config.url, config.login, config.password, timeout=_CHECK_TIMEOUT)
+    client = YaDiskClient(config.token, config.api_url, timeout=_CHECK_TIMEOUT)
     return SyncService(db_path, client, config.remote_dir, STATE_PATH, config.device_name,
                        transfer_timeout=_TRANSFER_TIMEOUT, target_id=config.target_id)
 
 
+def refresh_token_if_needed(config: SyncConfig, service: SyncService) -> None:
+    """Обновить токен, если до конца его действия меньше месяца. Сбой не мешает
+    синхронизации: старый токен ещё действует, обновим в следующий раз.
+    Вызывается в фоновом потоке."""
+    if not config.refresh_token or not config.token_expires_at:
+        return
+    if config.token_expires_at - time.time() > _REFRESH_BEFORE:
+        return
+    try:
+        tokens = refresh_tokens(config.refresh_token)
+    except (OAuthError, YaDiskError):
+        return
+    config.token, config.refresh_token = tokens.access_token, tokens.refresh_token
+    config.token_expires_at = tokens.expires_at
+    service.client.token = tokens.access_token
+    try:
+        save_config(config)
+    except OSError:
+        pass  # новый токен проработает до перезапуска, потом обновится снова
+
+
 def describe_error(error: Exception) -> str:
     """Текст ошибки для оператора."""
-    if isinstance(error, WebDavError):
+    if isinstance(error, YaDiskError):
         if error.is_auth_error:
-            return "Яндекс.Диск не принял логин или пароль приложения. Проверьте их в «Настройках»."
+            return ("Яндекс.Диск не принял вход: доступ отозван или истёк. "
+                    "Войдите в Яндекс заново в «Настройках».")
         if error.is_tls_error:
             return (
                 "Не удалось проверить защищённое соединение с Яндекс.Диском. "
@@ -108,11 +140,35 @@ def ask_yes_no(parent, title: str, text: str, default_yes: bool) -> bool:
     return box.clickedButton() is yes
 
 
+def format_size(size: float) -> str:
+    """Размер для оператора: «850 КБ», «3,4 МБ»."""
+    if size < 1024 * 1024:
+        return f"{max(size, 0) / 1024:.0f} КБ"
+    return f"{size / (1024 * 1024):.1f} МБ".replace(".", ",")
+
+
+class _ProgressRelay(QObject):
+    """Ход передачи из фонового потока в окно: сигнал доставляется в поток
+    окна. Чаще _PROGRESS_INTERVAL не сообщаем — иначе очередь событий забьётся."""
+    changed = Signal(object, object)
+
+    def __init__(self):
+        super().__init__()
+        self._last = 0.0
+
+    def report(self, done: int, total: int) -> None:
+        now = time.monotonic()
+        if now - self._last >= _PROGRESS_INTERVAL or (total and done >= total):
+            self._last = now
+            self.changed.emit(done, total)
+
+
 class _BusyDialog(QDialog):
     def __init__(self, parent, text, token):
         super().__init__(parent)
         self._token = token
         self._finished = False
+        self._samples = deque()     # (время, передано байт) за последние _SPEED_WINDOW с
         self.cancelled = False
         self.setWindowTitle("Синхронизация")
         self.setWindowModality(Qt.WindowModal)
@@ -124,10 +180,14 @@ class _BusyDialog(QDialog):
         layout.setSpacing(12)
         self._label = QLabel(text)
         layout.addWidget(self._label)
-        bar = QProgressBar()
-        bar.setRange(0, 0)
-        bar.setTextVisible(False)
-        layout.addWidget(bar)
+        self._bar = QProgressBar()
+        self._bar.setRange(0, 0)
+        self._bar.setTextVisible(False)
+        layout.addWidget(self._bar)
+        self._transfer_label = QLabel("")
+        self._transfer_label.setObjectName("muted")
+        self._transfer_label.setVisible(False)
+        layout.addWidget(self._transfer_label)
         self._slow_hint = QLabel(f"Связь с Яндекс.Диском медленная. {VPN_HINT}")
         self._slow_hint.setObjectName("muted")
         self._slow_hint.setWordWrap(True)
@@ -144,10 +204,39 @@ class _BusyDialog(QDialog):
         row.addWidget(self._cancel_btn)
         layout.addLayout(row)
 
+    def _speed(self) -> float:
+        """Байт в секунду за последние _SPEED_WINDOW с; 0 — данных мало."""
+        if len(self._samples) < 2:
+            return 0.0
+        (t0, d0), (t1, d1) = self._samples[0], self._samples[-1]
+        return (d1 - d0) / (t1 - t0) if t1 > t0 else 0.0
+
+    def on_progress(self, done, total):
+        now = time.monotonic()
+        self._samples.append((now, done))
+        while len(self._samples) > 2 and now - self._samples[0][0] > _SPEED_WINDOW:
+            self._samples.popleft()
+        if total:
+            self._bar.setRange(0, 1000)
+            self._bar.setValue(min(1000, done * 1000 // total))
+            text = f"{format_size(done)} из {format_size(total)}"
+        else:
+            text = format_size(done)
+        speed = self._speed()
+        if speed > 0:
+            text += f" · {format_size(speed)}/с"
+        self._transfer_label.setText(text)
+        self._transfer_label.setVisible(True)
+
     def _show_slow_hint(self):
-        if not self._finished:
-            self._slow_hint.setVisible(True)
-            self.adjustSize()
+        if self._finished:
+            return
+        if self._samples and self._speed() >= _SLOW_SPEED:
+            # Передача идёт с нормальной скоростью — проверим ещё раз позже.
+            self._slow_timer.start(_SLOW_HINT_MS)
+            return
+        self._slow_hint.setVisible(True)
+        self.adjustSize()
 
     def finish(self):
         self._finished = True
@@ -202,15 +291,23 @@ def stop_pending_work() -> None:
         _abandoned.discard(worker)
 
 
-def run_with_progress(parent, text, fn):
+def run_with_progress(parent, text, fn, transfer=False):
     """Выполнить fn(token) в фоновом потоке под модальным индикатором с кнопкой
     «Отмена». Возвращает результат fn, поднимает его исключение либо
-    SyncCancelled, если пользователь отменил."""
+    SyncCancelled, если пользователь отменил.
+
+    transfer — fn передаёт файл: вызывается как fn(token, progress), и окно
+    показывает объём, долю и скорость передачи."""
     if _abandoned:
         raise SyncError("Предыдущая операция ещё завершается. Повторите через минуту.")
     token = CancelToken()
     dialog = _BusyDialog(parent, text, token)
-    worker = _Worker(lambda: fn(token))
+    if transfer:
+        relay = _ProgressRelay()
+        relay.changed.connect(dialog.on_progress)
+        worker = _Worker(lambda: fn(token, relay.report))
+    else:
+        worker = _Worker(lambda: fn(token))
     worker.finished.connect(dialog.finish)
     worker.start()
     dialog.exec_()
@@ -370,11 +467,16 @@ def synchronize(main_window, config: SyncConfig, confirm_pull: bool = False) -> 
 
     confirm_pull — спрашивать перед загрузкой с Диска (для автоматических
     запусков; при ручном нажатии кнопки пользователь уже согласился).
-    Поднимает WebDavError, SyncError, SyncCancelled.
+    Поднимает YaDiskError, SyncError, SyncCancelled.
     """
     service = make_sync_service(config, main_window.db_manager.db_path)
     main_window.release_db()
-    check = run_with_progress(main_window, "Проверка Яндекс.Диска…", lambda token: service.check())
+
+    def check_disk(token):
+        refresh_token_if_needed(config, service)
+        return service.check()
+
+    check = run_with_progress(main_window, "Проверка Яндекс.Диска…", check_disk)
     status = check.status
 
     if status == SyncStatus.UP_TO_DATE:
@@ -396,14 +498,14 @@ def synchronize(main_window, config: SyncConfig, confirm_pull: bool = False) -> 
     if status == SyncStatus.LOCAL_AHEAD:
         rev = run_with_progress(
             main_window, "Выгрузка базы на Яндекс.Диск…",
-            lambda token: service.push(check.meta, token),
+            lambda token, progress: service.push(check.meta, token, progress), transfer=True,
         )
         return SyncResult(SyncOutcome.PUSHED,
                           f"Изменения выложены на Яндекс.Диск (ревизия {rev}).")
 
     rev = run_with_progress(
         main_window, "Загрузка базы с Яндекс.Диска…",
-        lambda token: service.pull(check.meta, token),
+        lambda token, progress: service.pull(check.meta, token, progress), transfer=True,
     )
     try:
         main_window.reload_db()
@@ -444,7 +546,7 @@ def sync_interactive(main_window, config: SyncConfig, announce: bool = False,
             result = synchronize(main_window, config, confirm_pull=confirm_pull)
         except SyncCancelled:
             return False
-        except WebDavError as e:
+        except YaDiskError as e:
             if e.is_network_error:
                 if _ask_retry_offline(main_window, has_local_changes(main_window, config) is True,
                                       _probe_internet(main_window)):
