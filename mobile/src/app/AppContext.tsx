@@ -7,7 +7,7 @@
 import {
   createContext, type ReactNode, useCallback, useContext, useEffect, useMemo, useRef, useState,
 } from 'react';
-import { ActivityIndicator, Alert, AppState, Modal, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Alert, AppState, Modal, StyleSheet, View } from 'react-native';
 
 import type { Db } from '../core/db';
 import { configureConnection, ensureSchema } from '../core/schema';
@@ -23,8 +23,8 @@ import { openExpoDb } from '../platform/expoDb';
 import { DB_PATH, deviceDeps, loadConfig, saveConfig, sha256, STATE_PATH } from '../platform/deps';
 import { probeInternet } from '../platform/io';
 import { oauthEnv, transport } from '../platform/yandex';
-import { Button } from '../ui/components';
-import { colors, radius, space } from '../ui/theme';
+import { Button, Text } from '../ui/components';
+import { colors, radius, shadow, space, type } from '../ui/theme';
 
 const CHECK_TIMEOUT_MS = 15_000;
 const TRANSFER_TIMEOUT_MS = 300_000;
@@ -402,10 +402,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
 }
 
 const styles = StyleSheet.create({
-  backdrop: { flex: 1, backgroundColor: 'rgba(15,23,42,0.45)', justifyContent: 'center', padding: space.xl },
-  dialog: { backgroundColor: colors.surface, borderRadius: radius.lg, padding: space.xl, gap: space.lg },
-  dialogText: { fontSize: 16, color: colors.text, textAlign: 'center' },
+  backdrop: { flex: 1, backgroundColor: 'rgba(11,16,32,0.45)', justifyContent: 'center', padding: space.xl },
+  dialog: { backgroundColor: colors.surface, borderRadius: radius.xl, padding: space.xl, gap: space.lg, ...shadow },
+  dialogText: { ...type.h2, color: colors.text, textAlign: 'center' },
   bar: { height: 8, borderRadius: 4, backgroundColor: colors.primarySoft, overflow: 'hidden' },
-  barFill: { height: 8, backgroundColor: colors.primary },
-  hint: { fontSize: 13, color: colors.textSecondary, textAlign: 'center', lineHeight: 18 },
+  barFill: { height: 8, borderRadius: 4, backgroundColor: colors.primary },
+  hint: { ...type.caption, color: colors.textSecondary, textAlign: 'center' },
 });

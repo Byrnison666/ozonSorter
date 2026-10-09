@@ -1,7 +1,7 @@
 /** «Залежавшиеся посылки» (stale_screen.py ПК): фильтры, подсветка по дням, выгрузка. */
 import { type ParamListBase, type RouteProp, useRoute } from '@react-navigation/native';
 import { useEffect, useState } from 'react';
-import { FlatList, StyleSheet, Text, View } from 'react-native';
+import { FlatList, StyleSheet, View } from 'react-native';
 
 import { useApp, useDbQuery } from '../app/AppContext';
 import { type DeliveryPoint, pointLabel, POINT_LABELS } from '../core/models';
@@ -10,10 +10,19 @@ import {
 } from '../core/staleService';
 import { formatTime } from '../core/sync/flow';
 import { shareXlsx } from '../platform/io';
-import { Badge, Button, Empty, Segmented, StatTile, styles as ui, Tiles } from '../ui/components';
-import { colors, space } from '../ui/theme';
+import {
+  Badge, Button, Chips, Empty, StatTile, styles as ui, Text, Tiles,
+} from '../ui/components';
+import { colors, radius, shadow, space, type } from '../ui/theme';
 
 const MIN_DAYS_PRESETS = [0, WARN_DAYS, DANGER_DAYS, ALERT_DAYS, RETURN_DAYS];
+
+/** Цвета блока дней — как пилюля дней на ПК (_days_colors в stale_screen.py). */
+function daysColors(days: number): [string, string] {
+  if (days >= DANGER_DAYS) return [colors.dangerSoft, colors.dangerText];
+  if (days >= WARN_DAYS) return [colors.warningSoft, colors.warningText];
+  return [colors.surfaceAlt, colors.textSecondary];
+}
 
 function todayIso(): string {
   const d = new Date();
@@ -55,52 +64,53 @@ export function StaleScreen() {
   return (
     <FlatList
       style={{ backgroundColor: colors.bg }}
-      contentContainerStyle={ui.screenContent}
+      // Между карточками посылок 10, от шапки до первой — 12 (marginBottom шапки).
+      contentContainerStyle={[ui.screenContent, { gap: 10 }]}
       data={rows}
       keyExtractor={(r, i) => `${r.posting_number}|${r.product_label}|${i}`}
       ListHeaderComponent={(
-        <View style={{ gap: space.md }}>
+        <View style={{ gap: space.md, marginBottom: 2 }}>
           {latest ? (
-            <Text style={ui.muted}>По отчёту от {formatTime(latest.started_at)} — {latest.source_file_name || '—'}</Text>
+            <Text style={ui.mutedSmall}>По отчёту от {formatTime(latest.started_at)} — {latest.source_file_name || '—'}</Text>
           ) : null}
           {latest && latest.started_at.slice(0, 10) < todayIso()
-            ? <Badge tone="warning" text="отчёт не сегодняшний — загрузите свежий" /> : null}
-          <Segmented
+            ? <Badge tone="warning" dot text="отчёт не сегодняшний — загрузите свежий" /> : null}
+          <Chips
             options={[{ label: 'Все точки', value: null as DeliveryPoint | null },
               ...(Object.keys(POINT_LABELS) as DeliveryPoint[]).map((p) => ({ label: POINT_LABELS[p], value: p }))]}
             value={point}
             onChange={setPoint}
           />
-          <Segmented
+          <Chips
             options={MIN_DAYS_PRESETS.map((d) => ({ label: d ? `От ${d} дней` : 'Любой срок', value: d }))}
             value={minDays}
             onChange={setMinDays}
           />
-          <Tiles>
+          <Tiles columns={3}>
             <StatTile label="Показано" value={rows.length} />
             <StatTile label={`${WARN_DAYS}–${DANGER_DAYS - 1} дней`} tone="warning"
               value={rows.filter((r) => r.days >= WARN_DAYS && r.days < DANGER_DAYS).length} />
             <StatTile label={`От ${DANGER_DAYS} дней`} tone="danger" value={rows.filter((r) => r.days >= DANGER_DAYS).length} />
           </Tiles>
-          <Button title="Выгрузить в Excel" onPress={onExport} disabled={!rows.length} />
+          <Button kind="primary" icon="download" title="Выгрузить в Excel" onPress={onExport} disabled={!rows.length} />
         </View>
       )}
       ListEmptyComponent={<Empty text={emptyText} />}
       renderItem={({ item }) => {
-        const tone = item.days >= DANGER_DAYS ? colors.dangerSoft : item.days >= WARN_DAYS ? colors.warningSoft : colors.surface;
+        const [daysBg, daysFg] = daysColors(item.days);
         return (
-          <View style={[s.item, { backgroundColor: tone }]}>
-            <View style={s.days}>
-              <Text style={s.daysValue}>{item.days}</Text>
-              <Text style={ui.mutedSmall}>дн.</Text>
+          <View style={s.item}>
+            <View style={[s.days, { backgroundColor: daysBg }]}>
+              <Text style={[s.daysValue, { color: daysFg }]}>{item.days}</Text>
+              <Text style={[s.daysUnit, { color: daysFg }]}>дн.</Text>
             </View>
-            <View style={{ flex: 1, gap: 2 }}>
-              <Text style={s.cell}>
-                Ячейка {item.cell || '—'}
-                {item.is_returned ? <Text style={s.returned}>  Возврат</Text> : null}
-              </Text>
+            <View style={s.body}>
+              <View style={s.top}>
+                <Text style={s.cell}>Ячейка {item.cell || '—'}</Text>
+                {item.is_returned ? <Badge tone="danger" dot text="Возврат" /> : null}
+              </View>
               <Text style={ui.text}>{item.posting_number}</Text>
-              <Text style={ui.muted} numberOfLines={2}>{item.product_name || item.product_label}</Text>
+              <Text style={s.product} numberOfLines={2}>{item.product_name || item.product_label}</Text>
               <Text style={ui.mutedSmall}>
                 {item.client_name || item.ozon_client_id}{item.phone ? ` · ${item.phone}` : ''} · {pointLabel(item.point)}
               </Text>
@@ -114,10 +124,14 @@ export function StaleScreen() {
 
 const s = StyleSheet.create({
   item: {
-    flexDirection: 'row', gap: space.md, borderWidth: 1, borderColor: colors.border, borderRadius: 12, padding: space.md,
+    flexDirection: 'row', gap: space.md, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border,
+    borderRadius: radius.lg, padding: space.md, ...shadow,
   },
-  days: { width: 44, alignItems: 'center' },
-  daysValue: { fontSize: 22, fontWeight: '700', color: colors.text, fontVariant: ['tabular-nums'] },
-  cell: { fontSize: 15, fontWeight: '600', color: colors.text },
-  returned: { color: colors.dangerText, fontWeight: '700' },
+  days: { width: 52, height: 58, borderRadius: radius.md, alignItems: 'center', justifyContent: 'center' },
+  daysValue: { fontSize: 22, lineHeight: 26, fontWeight: '600' },
+  daysUnit: { ...type.caption },
+  body: { flex: 1, gap: 3 },
+  top: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: space.sm },
+  cell: { ...type.bodyStrong, color: colors.text },
+  product: { ...type.caption, color: colors.textSecondary },
 });

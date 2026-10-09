@@ -6,7 +6,7 @@
  */
 import { type NavigationProp, type ParamListBase, useNavigation } from '@react-navigation/native';
 import { useState } from 'react';
-import { StyleSheet, Text, View } from 'react-native';
+import { StyleSheet, View } from 'react-native';
 
 import { useApp, useDbQuery } from '../app/AppContext';
 import {
@@ -20,8 +20,10 @@ import { ALERT_DAYS, returnAlert, returnAlertText } from '../core/staleService';
 import { formatTime } from '../core/sync/flow';
 import { sha256 } from '../platform/deps';
 import { pickXlsx, shareXlsx } from '../platform/io';
-import { Badge, Button, Card, Screen, StatTile, styles, Tiles } from '../ui/components';
-import { colors } from '../ui/theme';
+import {
+  Badge, Button, Card, Icon, Screen, StatTile, styles, Text, Tiles,
+} from '../ui/components';
+import { colors, radius, type } from '../ui/theme';
 
 function isToday(ts: string): boolean {
   const now = new Date();
@@ -116,31 +118,55 @@ export function DashboardScreen() {
     <Screen>
       {app.dbError ? <Badge tone="danger" text={`База не открылась: ${app.dbError}`} /> : null}
       {alert && alert[0] ? (
-        <View style={[styles.card, local.alert]}>
-          <Text style={[styles.cardTitle, local.alertText]}>Скоро возврат</Text>
-          <Text style={[styles.text, local.alertText]}>{returnAlertText(alert[0], alert[1])}</Text>
+        <View style={local.alert}>
+          <View style={local.row}>
+            <View style={[local.bubble, local.alertBubble]}>
+              <Icon name="alert-triangle" size={18} color={colors.onPrimary} />
+            </View>
+            <View style={local.textCol}>
+              <Text style={local.alertTitle}>Скоро возврат</Text>
+              <Text style={local.alertText}>{returnAlertText(alert[0], alert[1])}</Text>
+            </View>
+          </View>
           <Button
-            kind="danger"
+            icon="arrow-right"
             title="Показать посылки"
             // at — чтобы фильтр выставился и при повторном переходе с теми же параметрами.
             onPress={() => navigation.navigate('stale', { minDays: ALERT_DAYS, at: Date.now() })}
           />
         </View>
       ) : null}
-      <Card title="Загрузите файл от Казакова 68" subtitle="Отчёт склада Ozon (.xlsx) из Загрузок, Telegram или почты.">
-        <Button kind="primary" title="Выбрать отчёт" onPress={onImport} />
-      </Card>
+      <View style={local.hero}>
+        <View style={local.row}>
+          <View style={[local.bubble, local.heroBubble]}>
+            <Icon name="upload" size={22} color={colors.onPrimary} />
+          </View>
+          <View style={local.textCol}>
+            <Text style={local.heroTitle}>Загрузите файл от Казакова 68</Text>
+            <Text style={local.heroText}>Отчёт склада Ozon (.xlsx) из Загрузок, Telegram или почты.</Text>
+          </View>
+        </View>
+        <Button kind="primary" icon="file-text" title="Выбрать отчёт" onPress={onImport} />
+      </View>
 
       {latest ? (
         <>
-          <Card title="Результаты последнего импорта">
-            <Text style={styles.text}>{latest.source_file_name}</Text>
-            <Text style={styles.muted}>{formatTime(latest.started_at)}</Text>
-            {!isToday(latest.started_at) ? <Badge tone="warning" text="отчёт не сегодняшний — загрузите свежий" /> : null}
+          <Card>
+            <View style={local.head}>
+              <Text style={styles.cardTitle}>Результаты последнего импорта</Text>
+              <View style={local.file}>
+                <Icon name="file-text" size={14} color={colors.textMuted} />
+                <Text style={[styles.mutedSmall, local.textCol]}>
+                  {latest.source_file_name} · {formatTime(latest.started_at)}
+                </Text>
+              </View>
+              {!isToday(latest.started_at)
+                ? <Badge tone="warning" dot text="отчёт не сегодняшний — загрузите свежий" /> : null}
+            </View>
+            <StatTile hero label="Новых к отгрузке" value={latest.new_to_ship_rows} />
             <Tiles>
               <StatTile label="Всего строк" value={latest.total_rows} />
               <StatTile label="Наших" value={latest.matched_rows} />
-              <StatTile label="Новых к отгрузке" value={latest.new_to_ship_rows} />
               <StatTile label="Уже на точках" value={latest.already_on_point} />
               <StatTile label="Возвраты" value={latest.returned_rows} />
               <StatTile label="Не наши" value={latest.not_ours_rows} />
@@ -151,7 +177,7 @@ export function DashboardScreen() {
             {Object.values(DeliveryPoint).map((point) => (
               <Button
                 key={point}
-                kind="primary"
+                icon="download"
                 title={`Excel для ${point === 'KOMSOMOLSKAYA_4' ? 'Комсомольской 4' : 'Кольцевой 16'}`}
                 busy={exporting === point}
                 disabled={exporting !== null}
@@ -166,6 +192,20 @@ export function DashboardScreen() {
 }
 
 const local = StyleSheet.create({
-  alert: { backgroundColor: colors.dangerSoft, borderColor: colors.danger },
-  alertText: { color: colors.dangerText },
+  row: { flexDirection: 'row', gap: 12 },
+  textCol: { flex: 1 },
+  bubble: { alignItems: 'center', justifyContent: 'center' },
+  alert: {
+    backgroundColor: colors.warningSoft, borderWidth: 1, borderColor: colors.warning, borderRadius: 18,
+    padding: 14, gap: 12,
+  },
+  alertBubble: { width: 36, height: 36, borderRadius: 11, backgroundColor: colors.warning },
+  alertTitle: { ...type.bodyStrong, color: colors.warningText, marginBottom: 3 },
+  alertText: { ...type.caption, color: colors.warningText },
+  hero: { backgroundColor: colors.ink, borderRadius: radius.xl, paddingTop: 20, paddingHorizontal: 18, paddingBottom: 18, gap: 14 },
+  heroBubble: { width: 44, height: 44, borderRadius: 14, backgroundColor: colors.inkRaised },
+  heroTitle: { ...type.h2, color: colors.onPrimary, marginBottom: 4 },
+  heroText: { ...type.caption, color: colors.inkText },
+  head: { gap: 6 },
+  file: { flexDirection: 'row', alignItems: 'center', gap: 6 },
 });

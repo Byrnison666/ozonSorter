@@ -1,6 +1,6 @@
 /** «Клиенты» — список, добавление, изменение, удаление, импорт (clients_screen.py ПК). */
 import { useState } from 'react';
-import { FlatList, KeyboardAvoidingView, Modal, Pressable, StyleSheet, Text, View } from 'react-native';
+import { FlatList, KeyboardAvoidingView, Modal, Pressable, StyleSheet, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { useApp, useDbQuery } from '../app/AppContext';
@@ -12,8 +12,10 @@ import {
 import { DeliveryPoint, pointLabel, POINT_LABELS } from '../core/models';
 import { readActiveSheet } from '../core/sheet';
 import { pickXlsx, shareXlsx } from '../platform/io';
-import { Button, Empty, Field, Segmented, styles as ui } from '../ui/components';
-import { colors, space } from '../ui/theme';
+import {
+  Button, Chips, Empty, Field, Icon, styles as ui, Text,
+} from '../ui/components';
+import { colors, radius, shadow, space, type } from '../ui/theme';
 
 const EMPTY_FORM: ClientForm = { ozonClientId: '', fullName: '', phone: '', point: null };
 
@@ -97,14 +99,17 @@ export function ClientsScreen() {
       <FlatList
         data={clients}
         keyExtractor={(c) => String(c.id)}
-        contentContainerStyle={ui.screenContent}
+        contentContainerStyle={[ui.screenContent, { gap: 10 }]}
         ListHeaderComponent={(
-          <View style={{ gap: space.sm }}>
+          <View style={{ gap: space.md, marginBottom: 2 }}>
             <Text style={ui.muted}>Постоянные Ozon ID наших клиентов и их точки выдачи.</Text>
-            <Button kind="primary" title="+ Добавить клиента" onPress={() => setEditing({ id: null, form: EMPTY_FORM })} />
+            <Button
+              kind="primary" icon="user-plus" title="Добавить клиента"
+              onPress={() => setEditing({ id: null, form: EMPTY_FORM })}
+            />
             <View style={ui.row}>
-              <View style={{ flex: 1 }}><Button title="Импорт из файла" onPress={onImportFile} /></View>
-              <View style={{ flex: 1 }}><Button title="Шаблон" onPress={onTemplate} /></View>
+              <View style={{ flex: 1 }}><Button icon="upload" title="Импорт из файла" onPress={onImportFile} /></View>
+              <View style={{ flex: 1 }}><Button icon="file-plus" title="Шаблон" onPress={onTemplate} /></View>
             </View>
             <Text style={ui.mutedSmall}>Клиентов: {clients.length}</Text>
           </View>
@@ -123,11 +128,17 @@ export function ClientsScreen() {
             })}
             style={({ pressed }) => [s.item, pressed && { backgroundColor: colors.surfaceAlt }]}
           >
-            <View style={{ flex: 1 }}>
-              <Text style={s.itemTitle}>{item.full_name || '—'}</Text>
-              <Text style={ui.muted}>{item.ozon_client_id}{item.phone ? ` · ${item.phone}` : ''}</Text>
+            <View style={s.avatar}>
+              {item.full_name?.trim()
+                ? <Text style={s.avatarText}>{item.full_name.trim().charAt(0).toUpperCase()}</Text>
+                : <Icon name="user" size={18} color={colors.primaryText} />}
+            </View>
+            <View style={{ flex: 1, gap: 2 }}>
+              <Text style={s.itemTitle} numberOfLines={1}>{item.full_name || '—'}</Text>
+              <Text style={ui.mutedSmall}>{item.ozon_client_id}{item.phone ? ` · ${item.phone}` : ''}</Text>
             </View>
             <Text style={s.point}>{pointLabel(item.fixed_delivery_point)}</Text>
+            <Icon name="chevron-right" size={18} color={colors.textMuted} />
           </Pressable>
         )}
       />
@@ -152,15 +163,15 @@ export function ClientsScreen() {
                   label="Телефон" placeholder="необязательно" keyboardType="phone-pad" value={editing.form.phone}
                   onChangeText={(v) => setEditing({ ...editing, form: { ...editing.form, phone: v } })}
                 />
-                <Text style={ui.mutedSmall}>Точка выдачи</Text>
-                <Segmented
+                <Text style={s.fieldLabel}>Точка выдачи</Text>
+                <Chips
                   options={Object.values(DeliveryPoint).map((p) => ({ label: POINT_LABELS[p], value: p as DeliveryPoint | null }))}
                   value={editing.form.point}
                   onChange={(point) => setEditing({ ...editing, form: { ...editing.form, point } })}
                 />
-                <Button kind="primary" title="Сохранить" onPress={onSave} />
+                <Button kind="primary" icon="save" title="Сохранить" onPress={onSave} />
                 <Button title="Отмена" onPress={() => setEditing(null)} />
-                {current ? <Button kind="danger" title="Удалить клиента" onPress={() => onDelete(current)} /> : null}
+                {current ? <Button kind="danger" icon="trash-2" title="Удалить клиента" onPress={() => onDelete(current)} /> : null}
               </View>
             ) : null}
           </KeyboardAvoidingView>
@@ -173,9 +184,15 @@ export function ClientsScreen() {
 const s = StyleSheet.create({
   item: {
     flexDirection: 'row', alignItems: 'center', gap: space.md, backgroundColor: colors.surface,
-    borderWidth: 1, borderColor: colors.border, borderRadius: 12, padding: space.md, minHeight: 56,
+    borderWidth: 1, borderColor: colors.border, borderRadius: radius.lg, padding: space.md, minHeight: 64, ...shadow,
   },
-  itemTitle: { fontSize: 16, color: colors.text, fontWeight: '500' },
-  point: { fontSize: 13, color: colors.primaryText },
-  formTitle: { fontSize: 20, fontWeight: '600', color: colors.text },
+  avatar: {
+    width: 40, height: 40, borderRadius: radius.md, backgroundColor: colors.primarySoft,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  avatarText: { ...type.h2, color: colors.primaryText },
+  itemTitle: { ...type.bodyStrong, color: colors.text },
+  point: { ...type.captionStrong, color: colors.primaryText },
+  formTitle: { fontSize: 22, lineHeight: 28, fontWeight: '600', letterSpacing: -0.2, color: colors.text },
+  fieldLabel: { ...type.captionStrong, color: colors.textSecondary },
 });

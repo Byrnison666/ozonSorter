@@ -1,6 +1,6 @@
 /** «Настройки» — Яндекс.Диск (settings_screen.py ПК): вход по коду, имя устройства, ручная синхронизация. */
 import { useEffect, useRef, useState } from 'react';
-import { Linking, StyleSheet, Text } from 'react-native';
+import { Linking, StyleSheet } from 'react-native';
 
 import { useApp } from '../app/AppContext';
 import { forgetLegacy, isConfigured, type SyncConfig } from '../core/sync/config';
@@ -8,8 +8,10 @@ import { describeLoginError } from '../core/sync/flow';
 import { type DeviceCode, fetchUser, pollToken, requestDeviceCode } from '../core/sync/yandexOAuth';
 import { adoptLegacySyncState } from '../platform/deps';
 import { oauthEnv } from '../platform/yandex';
-import { Badge, Button, Card, Field, Screen, styles as ui } from '../ui/components';
-import { colors } from '../ui/theme';
+import {
+  Badge, Button, Card, Field, Screen, styles as ui, Text,
+} from '../ui/components';
+import { colors, radius } from '../ui/theme';
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -122,7 +124,10 @@ export function SettingsScreen() {
             </Text>
             {code ? <Text selectable style={styles.code}>{code.userCode}</Text> : null}
             {code ? (
-              <Button kind="primary" title="Открыть страницу" onPress={() => void Linking.openURL(code.verificationUrl)} />
+              <Button
+                kind="primary" icon="external-link" title="Открыть страницу"
+                onPress={() => void Linking.openURL(code.verificationUrl)}
+              />
             ) : null}
             <Button title="Отмена" onPress={onCancelLogin} />
           </>
@@ -134,8 +139,8 @@ export function SettingsScreen() {
                 : 'Вход в Яндекс не выполнен — синхронизация выключена.'}
             </Text>
             {app.configured
-              ? <Button title="Выйти из Яндекса" onPress={onLogout} />
-              : <Button kind="primary" title="Войти в Яндекс" onPress={onLogin} />}
+              ? <Button icon="log-out" title="Выйти из Яндекса" onPress={onLogout} />
+              : <Button kind="primary" icon="log-in" title="Войти в Яндекс" onPress={onLogin} />}
           </>
         )}
         <Field label="Имя устройства" placeholder="как подписывать это устройство, например «Телефон Ани»"
@@ -144,13 +149,14 @@ export function SettingsScreen() {
           Пароль от Яндекса приложение не видит: вход подтверждается на странице Яндекса. Доступ есть только
           к папке приложения на Диске; токен хранится в защищённом хранилище Android.
         </Text>
-        <Button title="Сохранить" onPress={onSave} />
-        <Button title="Синхронизировать" onPress={onSync} busy={app.syncBusy} disabled={!app.configured} />
+        <Button icon="save" title="Сохранить" onPress={onSave} />
+        <Button icon="refresh-cw" title="Синхронизировать" onPress={onSync} busy={app.syncBusy} disabled={!app.configured} />
         {status ? <Text style={ui.muted}>{status}</Text> : null}
       </Card>
       {app.configured ? (
         <Badge
           tone={app.dirty === false ? 'success' : 'warning'}
+          dot
           text={app.dirty === null ? 'Яндекс.Диск: не удалось проверить изменения'
             : app.dirty ? 'Яндекс.Диск: есть невыложенные изменения' : 'Яндекс.Диск: невыложенных изменений нет'}
         />
@@ -164,5 +170,8 @@ export function SettingsScreen() {
 }
 
 const styles = StyleSheet.create({
-  code: { fontSize: 28, fontWeight: '600', letterSpacing: 4, textAlign: 'center', color: colors.text },
+  code: {
+    fontSize: 28, lineHeight: 36, fontWeight: '600', letterSpacing: 4, textAlign: 'center', color: colors.text,
+    backgroundColor: colors.surfaceAlt, borderRadius: radius.md, paddingVertical: 10, overflow: 'hidden',
+  },
 });
