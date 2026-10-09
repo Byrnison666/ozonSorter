@@ -45,6 +45,14 @@ WINEPREFIX=~/.wine-ozon wine C:\\Python310\\python.exe -m PyInstaller OzonSorter
 - **Дедуп между отчётами.** `Shipment.exported_import_session_id`: `generate_export` берёт `TO_SHIP` с `last_seen==текущая` и (`exported_import_session_id IS NULL` или `==текущая`), затем помечает. «Остатки на складе» не выгружаются повторно.
 - **Формат экспорта «Отгрузка <ТОЧКА>»** (заказчик): A=описание (`product_name`), B=номер, C=штрихкод, D=ячейка, E=повреждение. Столбца «Статус» быть НЕ должно.
 
+## Оформление (с 1.10.0 / телефон 1.2.0)
+
+Дизайн-система «Ink & Porcelain» (макеты в Figma): палитра и стили — `src/ui/theme.py` и `mobile/src/ui/theme.ts`, держать их согласованными. Шрифт Onest (`assets/fonts`, `mobile/assets/fonts`, OFL), иконки Lucide на ПК (`assets/icons`), Feather на телефоне. Иконки приложений генерирует `tools/make_icons.py`.
+
+- QSS `min-height`/`max-height` перекрывают `setFixedHeight`/`setMinimumHeight` из кода — высоты задавать в QSS.
+- Onest Medium/SemiBold под GDI — отдельные семейства (`FONT_MEDIUM`/`FONT_SEMIBOLD`), не font-weight.
+- Телефон: Onest — XML-семейство плагина expo-font в `app.json` (нужен prebuild), экраны берут `Text`/`TextInput` из `src/ui/components.tsx`, а не из react-native. `tabular-nums` у Onest рисует «11» как «1 1».
+
 ## Проверка
 
 - Dev: запуск по команде выше, прогон тестов (`.venv/bin/python -m unittest discover -s tests`).

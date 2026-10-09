@@ -7,7 +7,7 @@ from PySide2.QtWidgets import QApplication
 from src.backup import backup_database
 from src.database import DatabaseManager
 from src.ui.main_window import MainWindow
-from src.ui.theme import QSS
+from src.ui.theme import QSS, load_fonts
 
 
 def main():
@@ -23,9 +23,8 @@ def main():
     app.setApplicationName("OzonSorter")
     app.setStyle("Fusion")
 
-    default_font = QFont("Segoe UI Variable Text", 10)
-    if not default_font.exactMatch():
-        default_font = QFont("Segoe UI", 10)
+    # Onest лежит в assets/fonts; не загрузился — системный Segoe UI.
+    default_font = QFont("Onest", 10) if load_fonts() else QFont("Segoe UI", 10)
     app.setFont(default_font)
 
     app.setStyleSheet(QSS)

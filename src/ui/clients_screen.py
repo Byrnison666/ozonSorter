@@ -34,6 +34,7 @@ class ClientsScreen(QWidget):
         title_block.addWidget(h1)
         sub = QLabel("Постоянные Ozon ID наших клиентов и их точки выдачи.")
         sub.setObjectName("subtitle")
+        sub.setWordWrap(True)
         title_block.addWidget(sub)
         header.addLayout(title_block, 1)
 
@@ -70,6 +71,7 @@ class ClientsScreen(QWidget):
         self.table.setColumnCount(4)
         self.table.setHorizontalHeaderLabels(["Ozon ID", "ФИО", "Телефон", "Точка"])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.table.horizontalHeader().setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.table.verticalHeader().setVisible(False)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setShowGrid(False)

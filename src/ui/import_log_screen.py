@@ -8,9 +8,10 @@ from sqlalchemy import select
 from src.models import ImportSession
 
 
+# Длинные заголовки в две строки — иначе числовые столбцы съедают ширину «Файла».
 _COLUMNS = [
-    "Дата", "Файл", "Всего", "Наших", "Новых к отгрузке",
-    "Возвраты", "Уже на точках", "Не наши", "КТЯ", "Примечание",
+    "Дата", "Файл", "Всего", "Наших", "Новых\nк отгрузке",
+    "Возвраты", "Уже\nна точках", "Не наши", "КТЯ", "Примечание",
 ]
 
 
@@ -63,6 +64,9 @@ class ImportLogScreen(QWidget):
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.table.setFrameShape(QFrame.NoFrame)
+        # У имени файла важен и конец — дата. Сокращение посередине работает только без переноса.
+        self.table.setWordWrap(False)
+        self.table.setTextElideMode(Qt.ElideMiddle)
         self.table.verticalHeader().setDefaultSectionSize(38)
         card_lay.addWidget(self.table)
         layout.addWidget(card, 1)
@@ -109,6 +113,8 @@ class ImportLogScreen(QWidget):
             ]
             for col, val in enumerate(values):
                 item = QTableWidgetItem(str(val))
+                if col == 1:
+                    item.setToolTip(str(val))
                 if col >= 2 and col <= 8:
                     item.setTextAlignment(Qt.AlignCenter)
                 self.table.setItem(row, col, item)
