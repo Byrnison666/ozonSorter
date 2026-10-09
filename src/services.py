@@ -21,7 +21,7 @@ class ImportService:
             select(ImportSession).where(ImportSession.source_file_sha256 == file_hash)
         ).scalar_one_or_none()
 
-    def process_import(self, file_path: str) -> ImportSession:
+    def process_import(self, file_path: str, rows: Optional[List[Dict[str, Any]]] = None) -> ImportSession:
         file_hash = self.parser.get_file_sha256(file_path)
         
         # Check if already imported
@@ -39,7 +39,10 @@ class ImportService:
         self.session.add(import_session)
         self.session.flush() # Get ID
         
-        rows = self.parser.parse_file(file_path)
+        # rows передаёт экран импорта: он уже разобрал файл для проверки
+        # (check_report) — не читаем его второй раз.
+        if rows is None:
+            rows = self.parser.parse_file(file_path)
         import_session.total_rows = len(rows)
         
         logs = []

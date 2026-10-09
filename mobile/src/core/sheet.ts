@@ -19,6 +19,15 @@ export function readActiveSheet(data: Uint8Array): CellValue[][] {
 
   const date1904 = Boolean(wb.Workbook?.WBProps?.date1904);
   const range = XLSX.utils.decode_range(ws['!ref']);
+  // Генератор отчётов Ozon оставляет в <dimension> размер шаблона (B1:J6), а данные
+  // идут ниже. openpyxl эту запись не читает и считает размер по ячейкам; SheetJS
+  // ей верит и строк за ней не видит. Расширяем диапазон до последней ячейки.
+  for (const key of Object.keys(ws)) {
+    if (key.startsWith('!')) continue;
+    const { r, c } = XLSX.utils.decode_cell(key);
+    if (r > range.e.r) range.e.r = r;
+    if (c > range.e.c) range.e.c = c;
+  }
   const grid: CellValue[][] = [];
   for (let r = 0; r <= range.e.r; r++) {
     const row: CellValue[] = [];

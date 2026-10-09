@@ -9,6 +9,14 @@ import {
 export const SIGNATURE_COLUMNS = ['Номер отправления', 'Ячейка'] as const;
 export const READY_STATUS = 'Готово к выдаче';
 
+/** Статусы, которые программа знает (KNOWN_STATUSES); о прочих предупреждаем. */
+export const KNOWN_STATUSES = [
+  READY_STATUS, 'Отправить на склад', 'Вернуть продавцу', 'Разместить на Ozon Полку',
+] as const;
+
+/** Ячейки склада для возвратов (RETURN_CELL_PREFIXES). */
+export const RETURN_CELL_PREFIXES = ['на проверку', 'возврат'] as const;
+
 export const COLUMN_MAP: ReadonlyArray<readonly [string, LogicalColumn]> = [
   ['Этикетка\nНазвание', 'label_and_name'],
   ['Номер отправления', 'posting_number'],
@@ -48,9 +56,48 @@ export function normalizeOzonId(ozonId: CellValue | undefined): string {
 export function isReadyForPickup(status: CellValue | undefined, cell?: CellValue): boolean {
   if (status === null || status === undefined || pyStrip(pyStr(status)) === '') {
     const normalizedCell = pyStrip(pyTruthy(cell) ? pyStr(cell) : '').toLowerCase();
-    return !normalizedCell.startsWith('на проверку');
+    return !RETURN_CELL_PREFIXES.some((prefix) => normalizedCell.startsWith(prefix));
   }
   return pyStrip(pyStr(status)).toLowerCase() === READY_STATUS.toLowerCase();
+}
+
+/**
+ * Проверка разобранного отчёта до импорта (check_report). Ошибка — файл не
+ * загружать, предупреждение — загрузить после подтверждения оператора.
+ */
+export function checkReport(rows: ParsedRow[]): { errors: string[]; warnings: string[] } {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+  const total = rows.length;
+  if (total === 0) {
+    errors.push('В отчёте не найдено ни одной посылки: под шапкой таблицы пусто.');
+    return { errors, warnings };
+  }
+
+  const kty = rows.filter((r) => r.is_kty).length;
+  if (kty * 2 > total) {
+    errors.push(
+      `У ${kty} из ${total} строк номер отправления не похож на номер Ozon ` +
+        '(вида 12345678-0001-1). Похоже, это не тот отчёт.',
+    );
+  }
+
+  const known = new Set(KNOWN_STATUSES.map((s) => s.toLowerCase()));
+  const unknown = new Map<string, number>();
+  for (const r of rows) {
+    if (r.status === null || r.status === undefined) continue;
+    const text = pyStrip(pyStr(r.status));
+    if (text && !known.has(text.toLowerCase())) unknown.set(text, (unknown.get(text) ?? 0) + 1);
+  }
+  if (unknown.size > 0) {
+    const lines = [...unknown].map(([text, n]) => `«${text}» — ${n} шт.`).join('\n');
+    warnings.push(
+      'В отчёте есть статусы, которых программа не знает:\n' +
+        `${lines}\n` +
+        'Такие посылки в отгрузку не попадут.',
+    );
+  }
+  return { errors, warnings };
 }
 
 // \d в Python — любые десятичные цифры Unicode.

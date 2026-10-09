@@ -3,8 +3,9 @@
 Только «Готово к выдаче» можно забрать → идёт в отгрузку (TO_SHIP).
 «Отправить на склад» / «Вернуть продавцу» — возврат: в отгрузку не идёт,
 а уже стоявшая к отгрузке посылка снимается (RETURNED) и пропадает из экспорта.
-В отчёте без колонки «Статус» ячейки «На проверку-*» считаются возвратами,
-остальные строки сохраняют прежнее поведение и идут к отгрузке.
+«Разместить на Ozon Полку» — тоже возврат (такие посылки лежат в ячейках «Возврат-N»).
+В отчёте без колонки «Статус» ячейки «На проверку-*» и «Возврат-*» считаются
+возвратами, остальные строки сохраняют прежнее поведение и идут к отгрузке.
 """
 import os
 import tempfile
@@ -91,7 +92,7 @@ class StatusReadyTest(unittest.TestCase):
         self.assertIn("111-0001-1", self._export_postings(s.id))
 
     def test_return_status_not_shipped(self):
-        for status in ("Отправить на склад", "Вернуть продавцу"):
+        for status in ("Отправить на склад", "Вернуть продавцу", "Разместить на Ozon Полку"):
             with self.subTest(status=status):
                 posting = f"111-{status[:3]}-1"
                 s = self._import([(posting, status)])
@@ -132,6 +133,14 @@ class StatusReadyTest(unittest.TestCase):
     def test_review_cell_without_status_is_returned(self):
         posting = "111-0012-1"
         s = self._import([(posting, "На проверку-3")], with_status=False)
+        self.assertEqual(self._ship(posting).assignment_status,
+                         AssignmentStatus.RETURNED)
+        self.assertEqual(s.returned_rows, 1)
+        self.assertNotIn(posting, self._export_postings(s.id))
+
+    def test_return_cell_without_status_is_returned(self):
+        posting = "111-0013-1"
+        s = self._import([(posting, "Возврат-7")], with_status=False)
         self.assertEqual(self._ship(posting).assignment_status,
                          AssignmentStatus.RETURNED)
         self.assertEqual(s.returned_rows, 1)

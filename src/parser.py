@@ -17,6 +17,16 @@ class ExcelParser:
     # — возврат, в отгрузку не идут.
     READY_STATUS = 'Готово к выдаче'
 
+    # Статусы, которые программа знает. Готов к выдаче только READY_STATUS, прочие —
+    # возвраты. Незнакомый статус в отгрузку тоже не идёт, но о нём предупреждаем:
+    # Ozon мог ввести статус, который на деле означает «можно забрать».
+    KNOWN_STATUSES = (READY_STATUS, 'Отправить на склад', 'Вернуть продавцу',
+                      'Разместить на Ozon Полку')
+
+    # Ячейки склада для возвратов. В отчёте без «Статуса» — единственный признак
+    # возврата.
+    RETURN_CELL_PREFIXES = ('на проверку', 'возврат')
+
     COLUMN_MAP = {
         'Этикетка\nНазвание': 'label_and_name',
         'Номер отправления': 'posting_number',
@@ -52,13 +62,52 @@ class ExcelParser:
         """Готова ли посылка к выдаче со склада по колонке «Статус».
 
         В новом формате колонка «Статус» отсутствует, а возвраты помещаются в
-        ячейки «На проверку-*». Остальные строки без статуса считаем готовыми,
-        сохраняя совместимость со старыми отчётами.
+        ячейки «На проверку-*» и «Возврат-*». Остальные строки без статуса считаем
+        готовыми, сохраняя совместимость со старыми отчётами.
         """
         if status is None or str(status).strip() == '':
             normalized_cell = str(cell or '').strip().lower()
-            return not normalized_cell.startswith('на проверку')
+            return not normalized_cell.startswith(ExcelParser.RETURN_CELL_PREFIXES)
         return str(status).strip().lower() == ExcelParser.READY_STATUS.lower()
+
+    @staticmethod
+    def check_report(rows: List[Dict[str, Any]]) -> Tuple[List[str], List[str]]:
+        """Проверка разобранного отчёта до импорта: (ошибки, предупреждения).
+
+        Ошибка — файл не загружать: импорт стал бы «последним отчётом» без наших
+        посылок и опустошил бы «Отгрузку» и «Залежавшиеся». Предупреждение —
+        загрузить можно, но оператор должен подтвердить.
+        """
+        errors, warnings = [], []
+        total = len(rows)
+        if total == 0:
+            errors.append('В отчёте не найдено ни одной посылки: под шапкой таблицы пусто.')
+            return errors, warnings
+
+        kty = sum(1 for r in rows if r['is_kty'])
+        if kty * 2 > total:
+            errors.append(
+                f'У {kty} из {total} строк номер отправления не похож на номер Ozon '
+                f'(вида 12345678-0001-1). Похоже, это не тот отчёт.'
+            )
+
+        known = {s.lower() for s in ExcelParser.KNOWN_STATUSES}
+        unknown: Dict[str, int] = {}
+        for r in rows:
+            status = r.get('status')
+            if status is None:
+                continue
+            text = str(status).strip()
+            if text and text.lower() not in known:
+                unknown[text] = unknown.get(text, 0) + 1
+        if unknown:
+            lines = '\n'.join(f'«{text}» — {n} шт.' for text, n in unknown.items())
+            warnings.append(
+                'В отчёте есть статусы, которых программа не знает:\n'
+                f'{lines}\n'
+                'Такие посылки в отгрузку не попадут.'
+            )
+        return errors, warnings
 
     @staticmethod
     def extract_ozon_client_id(posting_number: str) -> Optional[str]:

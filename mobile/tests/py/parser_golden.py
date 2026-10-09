@@ -4,8 +4,10 @@ ExcelParser ПК. Печатает JSON {имя: {"rows": [...]} | {"error": "..
 """
 import json
 import os
+import re
 import shutil
 import sys
+import zipfile
 from datetime import datetime, time
 
 import openpyxl
@@ -101,6 +103,53 @@ def cases():
          time(13, 45, 10), None, None],
     ])
 
+    # Полный отчёт генератора Ozon: шапка с колонки B, лишняя колонка справа.
+    # Размер листа в <dimension> подменяется после сохранения (STALE_DIMENSION).
+    yield "stale_dimension", book([
+        [], [None, None, None, None, "Остатки на складе"], [], [None, None, None, None, "ДОНЕЦК"], [],
+        OLD_HEADER + ["Время до выставления претензии"],
+        ["", "1\nГотова", "7777777-0001-1", "Отправление", "Готово к выдаче", "91-1",
+         datetime(2026, 10, 8, 11, 52, 46), None, "\n", "1 ч 11 мин"],
+        ["", "2\nПолка", "7777777-0001-2", "Отправление", "Разместить на Ozon Полку",
+         "Возврат-2", None, None, "\n", "22 ч"],
+        ["", "3\nНа склад", "7777777-0001-3", "Отправление", "Отправить на склад",
+         "Возврат-3", None, None, None, None],
+    ])
+
+    yield "unknown_status", book([
+        OLD_HEADER[1:],
+        ["u\nЗнакомый", "8888888-0001-1", "Отправление", "Готово к выдаче", "1-1", None, None, None],
+        ["u\nНовый", "8888888-0001-2", "Отправление", "Передать курьеру", "1-2", None, None, None],
+        ["u\nНовый 2", "8888888-0001-3", "Отправление", " передать курьеру ", "1-3", None, None, None],
+        ["u\nЧисло", "8888888-0001-4", "Отправление", 15.5, "1-4", None, None, None],
+    ])
+
+    yield "empty_under_header", book([NEW_HEADER, [None, None, "без номера"]])
+
+    yield "mostly_kty", book([
+        NEW_HEADER,
+        ["k\nНомер", "9999999-0001-1", "1-1"],
+        ["k\nЧужой", "ii17574018168", "1-2"],
+        ["k\nЧисло", 9999999, "1-3"],
+    ])
+
+
+# Генератор отчётов Ozon оставляет в <dimension> размер шаблона, а строки идут
+# ниже — такой файл телефон раньше читал как пустой.
+STALE_DIMENSION = {"stale_dimension": "B1:J6"}
+
+
+def stale_dimension(path, ref):
+    tmp = path + ".tmp"
+    with zipfile.ZipFile(path) as src, zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as dst:
+        for item in src.infolist():
+            data = src.read(item.filename)
+            if item.filename == "xl/worksheets/sheet1.xml":
+                data, n = re.subn(rb'<dimension ref="[^"]*"', b'<dimension ref="%s"' % ref.encode(), data)
+                assert n == 1, "dimension not found"
+            dst.writestr(item, data)
+    os.replace(tmp, path)
+
 
 # Настоящий отчёт «Остатки на складе», пересохранённый в Excel владельцем:
 # пустые ячейки — <c s="5"/>, строки без номера, хвост с кодами сканера.
@@ -127,6 +176,8 @@ def sources():
     for name, wb in cases():
         path = os.path.join(OUT, f"{name}.xlsx")
         wb.save(path)
+        if name in STALE_DIMENSION:
+            stale_dimension(path, STALE_DIMENSION[name])
         yield name, path
     for name, src in FIXTURES.items():
         path = os.path.join(OUT, f"{name}.xlsx")
@@ -138,7 +189,11 @@ result = {}
 for name, path in sources():
     try:
         rows = ExcelParser().parse_file(path)
-        result[name] = {"rows": [{k: encode(v) for k, v in r.items()} for r in rows]}
+        errors, warnings = ExcelParser.check_report(rows)
+        result[name] = {
+            "rows": [{k: encode(v) for k, v in r.items()} for r in rows],
+            "check": {"errors": errors, "warnings": warnings},
+        }
     except ValueError as e:
         result[name] = {"error": str(e)}
 print(json.dumps(result, ensure_ascii=False))
