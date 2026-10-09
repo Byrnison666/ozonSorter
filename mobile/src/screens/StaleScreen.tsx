@@ -1,18 +1,19 @@
 /** «Залежавшиеся посылки» (stale_screen.py ПК): фильтры, подсветка по дням, выгрузка. */
-import { useState } from 'react';
+import { type ParamListBase, type RouteProp, useRoute } from '@react-navigation/native';
+import { useEffect, useState } from 'react';
 import { FlatList, StyleSheet, Text, View } from 'react-native';
 
 import { useApp, useDbQuery } from '../app/AppContext';
 import { type DeliveryPoint, pointLabel, POINT_LABELS } from '../core/models';
 import {
-  DANGER_DAYS, exportStaleXlsx, listStale, WARN_DAYS,
+  ALERT_DAYS, DANGER_DAYS, exportStaleXlsx, listStale, RETURN_DAYS, WARN_DAYS,
 } from '../core/staleService';
 import { formatTime } from '../core/sync/flow';
 import { shareXlsx } from '../platform/io';
 import { Badge, Button, Empty, Segmented, StatTile, styles as ui, Tiles } from '../ui/components';
 import { colors, space } from '../ui/theme';
 
-const MIN_DAYS_PRESETS = [0, WARN_DAYS, DANGER_DAYS, 14];
+const MIN_DAYS_PRESETS = [0, WARN_DAYS, DANGER_DAYS, ALERT_DAYS, RETURN_DAYS];
 
 function todayIso(): string {
   const d = new Date();
@@ -23,6 +24,11 @@ export function StaleScreen() {
   const app = useApp();
   const [point, setPoint] = useState<DeliveryPoint | null>(null);
   const [minDays, setMinDays] = useState(0);
+  // Переход с плашки «Скоро возврат» на «Главной» выставляет фильтр срока.
+  const params = useRoute<RouteProp<ParamListBase>>().params as { minDays?: number; at?: number } | undefined;
+  useEffect(() => {
+    if (params?.minDays !== undefined) setMinDays(params.minDays);
+  }, [params?.minDays, params?.at]);
   const { data } = useDbQuery((db) => {
     const latest = db.get<{ id: number; started_at: string; source_file_name: string }>(
       'SELECT id, started_at, source_file_name FROM import_sessions ORDER BY id DESC LIMIT 1',

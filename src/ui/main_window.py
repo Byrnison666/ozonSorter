@@ -7,6 +7,7 @@ from PySide2.QtWidgets import (
     QPushButton, QStackedWidget, QLabel, QFrame, QSizePolicy, QMessageBox
 )
 
+from src.stale_service import ALERT_DAYS
 from src.sync_config import load_config
 from src.sync_service import SyncStatus
 from src.yadisk_api import YaDiskError
@@ -142,11 +143,16 @@ class MainWindow(QMainWindow):
         self.sync_btn.clicked.connect(lambda _checked=False: self.sync_now(announce=True))
         layout.addWidget(self.sync_btn)
 
-        footer = QLabel("v1.9.0")
+        footer = QLabel("v1.9.1")
         footer.setObjectName("sidebarFooter")
         layout.addWidget(footer)
 
         return sidebar
+
+    def show_return_alert(self):
+        """«Залежавшиеся» с фильтром посылок, которые Ozon скоро может вернуть."""
+        self._screens["stale"].set_min_days(ALERT_DAYS)
+        self.go_to("stale")
 
     def go_to(self, key: str):
         if key not in self._key_to_index:

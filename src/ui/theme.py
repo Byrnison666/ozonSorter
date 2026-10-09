@@ -179,6 +179,22 @@ QFrame#card {{
     border-radius: 12px;
 }}
 
+QFrame#alertBanner {{
+    background-color: {Colors.DANGER_SOFT};
+    border: 1px solid {Colors.DANGER};
+    border-radius: 12px;
+}}
+
+QLabel#alertTitle {{
+    font-size: 15px;
+    font-weight: 700;
+    color: {Colors.DANGER_TEXT};
+}}
+
+QLabel#alertText {{
+    color: {Colors.DANGER_TEXT};
+}}
+
 QFrame#dropZone {{
     background-color: {Colors.SURFACE};
     border: 2px dashed {Colors.BORDER_STRONG};

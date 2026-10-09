@@ -8,7 +8,9 @@ from PySide2.QtWidgets import (
 
 from src.export_service import ExportService
 from src.models import DeliveryPoint
+from src.parser import ExcelParser
 from src.services import ImportService
+from src.stale_service import StaleShipmentService, return_alert_text
 
 from .sync_flow import ask_yes_no
 from .theme import make_stat_tile
@@ -39,6 +41,29 @@ class DashboardScreen(QWidget):
         header.addWidget(sub)
 
         layout.addLayout(header)
+
+        # --- «Скоро возврат»: наши посылки, которые Ozon скоро может вернуть ---
+        self.alert_banner = QFrame()
+        self.alert_banner.setObjectName("alertBanner")
+        alert_layout = QHBoxLayout(self.alert_banner)
+        alert_layout.setContentsMargins(20, 14, 20, 14)
+        alert_layout.setSpacing(16)
+        alert_texts = QVBoxLayout()
+        alert_texts.setSpacing(4)
+        alert_title = QLabel("Скоро возврат")
+        alert_title.setObjectName("alertTitle")
+        alert_texts.addWidget(alert_title)
+        self.alert_label = QLabel("")
+        self.alert_label.setObjectName("alertText")
+        self.alert_label.setWordWrap(True)
+        alert_texts.addWidget(self.alert_label)
+        alert_layout.addLayout(alert_texts, 1)
+        alert_btn = QPushButton("Показать посылки")
+        alert_btn.setObjectName("danger")
+        alert_btn.clicked.connect(self.main_window.show_return_alert)
+        alert_layout.addWidget(alert_btn, 0, Qt.AlignVCenter)
+        layout.addWidget(self.alert_banner)
+        self.alert_banner.setVisible(False)
 
         # --- Drop zone card ---
         self.drop_zone = QFrame()
@@ -149,6 +174,22 @@ class DashboardScreen(QWidget):
 
         layout.addStretch()
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.refresh_return_alert()
+
+    def refresh_return_alert(self):
+        """Показать плашку «Скоро возврат». Возвращает её текст ('' — нечего)."""
+        session = self.db_manager.get_session()
+        try:
+            alert, overdue = StaleShipmentService(session).return_alert()
+        finally:
+            session.close()
+        text = return_alert_text(alert, overdue) if alert else ""
+        self.alert_label.setText(text)
+        self.alert_banner.setVisible(bool(alert))
+        return text
+
     def on_import(self):
         file_path, _ = QFileDialog.getOpenFileName(
             self, "Выберите отчёт Ozon", "", "Excel Files (*.xlsx)"
@@ -168,7 +209,24 @@ class DashboardScreen(QWidget):
                 return
 
         try:
-            session = self.import_service.process_import(file_path)
+            # Сначала проверка: пустой или чужой отчёт стал бы «последним» и
+            # опустошил бы «Отгрузку» и «Залежавшиеся».
+            rows = self.import_service.parser.parse_file(file_path)
+            errors, warnings = ExcelParser.check_report(rows)
+            if errors:
+                QMessageBox.critical(
+                    self, "Файл не подходит",
+                    "\n\n".join(errors) + "\n\nФайл не загружен, база не изменилась.",
+                )
+                return
+            if warnings and not ask_yes_no(
+                self, "Проверьте отчёт",
+                "\n\n".join(warnings) + "\n\nЗагрузить файл?",
+                default_yes=False,
+            ):
+                return
+
+            session = self.import_service.process_import(file_path, rows)
             self.last_import_session_id = session.id
 
             self.file_name_label.setText(session.source_file_name)
@@ -182,16 +240,21 @@ class DashboardScreen(QWidget):
 
             self.stats_card.setVisible(True)
             self.export_card.setVisible(True)
-
-            QMessageBox.information(
-                self, "Импорт завершён",
-                f"Распознано наших посылок: {session.matched_rows}.\n"
-                f"Новых к отгрузке: {session.new_to_ship_rows}."
-            )
         except Exception as e:
             QMessageBox.critical(self, "Ошибка импорта",
                                  f"Не удалось импортировать файл:\n{e}")
             return
+
+        summary = (
+            f"Распознано наших посылок: {session.matched_rows}.\n"
+            f"Новых к отгрузке: {session.new_to_ship_rows}."
+        )
+        alert_text = self.refresh_return_alert()
+        if alert_text:
+            QMessageBox.warning(self, "Импорт завершён",
+                                summary + "\n\nСкоро возврат. " + alert_text)
+        else:
+            QMessageBox.information(self, "Импорт завершён", summary)
         # Последним действием: синхронизация может заменить базу и пересоздать
         # этот экран.
         self.main_window.on_data_changed()

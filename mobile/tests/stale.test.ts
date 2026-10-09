@@ -5,7 +5,8 @@ import { join } from 'node:path';
 import type { DeliveryPoint } from '../src/core/models';
 import { configureConnection, ensureSchema } from '../src/core/schema';
 import {
-  exportStaleXlsx, firstSeenLabel, listStale, staleCells, type StaleRow,
+  exportStaleXlsx, firstSeenLabel, listStale, returnAlert, returnAlertText, staleCells,
+  type StaleRow,
 } from '../src/core/staleService';
 import { openBunDb } from './support/bunDb';
 import { runPythonScript, tempDir } from './support/pc';
@@ -54,11 +55,26 @@ describe('залежавшиеся совпадают с ПК', () => {
     expect(pc.some((r: { is_returned: boolean }) => r.is_returned)).toBe(true);
   });
 
+  test('«скоро возврат» совпадает с ПК', () => {
+    const pc = JSON.parse(runPythonScript('stale_alert.py', db()));
+    const conn = openBunDb(db());
+    configureConnection(conn);
+    const alert = returnAlert(conn);
+    conn.close();
+    expect(alert).toEqual(pc.alert);
+    expect(returnAlertText(alert[0], alert[1])).toBe(pc.text);
+    expect(returnAlertText(alert[0], 0)).toBe(pc.text_no_overdue);
+    // Содержательно: есть и 10–13 дней, и от 14; возврат 19 дней не считается.
+    expect(alert[0]).toBeGreaterThan(alert[1]);
+    expect(alert[1]).toBeGreaterThan(0);
+  });
+
   test('без импортов — пусто', () => {
     const empty = openBunDb(join(dir.path, 'empty.db'));
     configureConnection(empty);
     ensureSchema(empty);
     expect(listStale(empty)).toEqual([]);
+    expect(returnAlert(empty)).toEqual([0, 0]);
     empty.close();
   });
 });

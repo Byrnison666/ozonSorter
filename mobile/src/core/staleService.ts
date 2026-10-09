@@ -9,6 +9,8 @@ import { type CellStyle, writeXlsx } from './xlsxWriter';
 
 export const WARN_DAYS = 3;   // с этого числа дней строка жёлтая
 export const DANGER_DAYS = 7; // с этого — красная
+export const ALERT_DAYS = 10;  // с этого предупреждаем: скоро возврат
+export const RETURN_DAYS = 14; // примерно столько Ozon хранит посылку, потом может вернуть
 
 export const STALE_COLUMNS = [
   'Дней в базе', 'Ячейка', 'Номер отправления', 'Штрихкод', 'Товар',
@@ -113,6 +115,23 @@ export function listStale(db: Db, point: DeliveryPoint | null = null, minDays = 
   keyed.sort((a, b) => (b.r.days - a.r.days) || compareKeys(a.key, b.key)
     || comparePyStrings(a.r.posting_number, b.r.posting_number));
   return keyed.map(({ r }) => r);
+}
+
+/**
+ * «Скоро возврат» (return_alert): [посылок от ALERT_DAYS дней, из них от
+ * RETURN_DAYS] — без уже помеченных возвратом.
+ */
+export function returnAlert(db: Db): [number, number] {
+  const rows = listStale(db, null, ALERT_DAYS).filter((r) => !r.is_returned);
+  return [rows.length, rows.filter((r) => r.days >= RETURN_DAYS).length];
+}
+
+/** Текст предупреждения «Скоро возврат» (return_alert_text). */
+export function returnAlertText(alert: number, overdue: number): string {
+  let text = `Посылок наших клиентов, которые числятся в отчёте склада ${ALERT_DAYS} дней и больше: ${alert}`;
+  if (overdue) text += `, из них ${RETURN_DAYS} дней и больше: ${overdue}`;
+  return `${text}.\nOzon хранит посылку около ${RETURN_DAYS} дней, затем может вернуть её ` +
+    'отправителю. Список — в разделе «Залежавшиеся посылки».';
 }
 
 export function exportStaleXlsx(rows: StaleRow[]): Uint8Array {

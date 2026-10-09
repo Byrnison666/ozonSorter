@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Tuple
 from sqlalchemy.orm import Session
 from sqlalchemy import select
 import openpyxl
@@ -13,6 +13,8 @@ from .models import (
 
 WARN_DAYS = 3      # с этого числа дней строка подсвечивается жёлтым
 DANGER_DAYS = 7    # с этого — красным
+ALERT_DAYS = 10    # с этого программа предупреждает: скоро возврат
+RETURN_DAYS = 14   # примерно столько Ozon хранит посылку, потом может вернуть
 
 POINT_LABELS = {
     DeliveryPoint.KOMSOMOLSKAYA_4: "Комсомольская 4",
@@ -70,6 +72,17 @@ class StaleRow:
         ]
 
 
+def return_alert_text(alert: int, overdue: int) -> str:
+    """Текст предупреждения «Скоро возврат» (после импорта и на «Главной»)."""
+    text = (f"Посылок наших клиентов, которые числятся в отчёте склада "
+            f"{ALERT_DAYS} дней и больше: {alert}")
+    if overdue:
+        text += f", из них {RETURN_DAYS} дней и больше: {overdue}"
+    return (text + ".\n"
+            f"Ozon хранит посылку около {RETURN_DAYS} дней, затем может вернуть её "
+            f"отправителю. Список — в разделе «Залежавшиеся посылки».")
+
+
 class StaleShipmentService:
     def __init__(self, db_session: Session):
         self.session = db_session
@@ -124,6 +137,12 @@ class StaleShipmentService:
 
         rows.sort(key=lambda r: (-r.days, natural_key(r.cell), r.posting_number))
         return rows
+
+    def return_alert(self) -> Tuple[int, int]:
+        """(посылок от ALERT_DAYS дней, из них от RETURN_DAYS) — без уже
+        помеченных возвратом: они и так уходят со склада."""
+        rows = [r for r in self.list_stale(min_days=ALERT_DAYS) if not r.is_returned]
+        return len(rows), sum(1 for r in rows if r.days >= RETURN_DAYS)
 
     @staticmethod
     def export_xlsx(rows: List[StaleRow], output_path: str) -> int:

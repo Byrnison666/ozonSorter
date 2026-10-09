@@ -4,8 +4,9 @@
  * базы, а не только сделанный в этом запуске, — Android выгружает приложение
  * из памяти, и повторно загружать отчёт ради выгрузки не нужно.
  */
+import { type NavigationProp, type ParamListBase, useNavigation } from '@react-navigation/native';
 import { useState } from 'react';
-import { Text } from 'react-native';
+import { StyleSheet, Text, View } from 'react-native';
 
 import { useApp, useDbQuery } from '../app/AppContext';
 import {
@@ -13,12 +14,14 @@ import {
 } from '../core/exportService';
 import { findDuplicateImport, type ImportSessionRow, processImport } from '../core/importService';
 import { DeliveryPoint, POINT_LABELS } from '../core/models';
-import { parseReport } from '../core/parser';
+import { checkReport, parseReport } from '../core/parser';
 import { readActiveSheet } from '../core/sheet';
+import { ALERT_DAYS, returnAlert, returnAlertText } from '../core/staleService';
 import { formatTime } from '../core/sync/flow';
 import { sha256 } from '../platform/deps';
 import { pickXlsx, shareXlsx } from '../platform/io';
 import { Badge, Button, Card, Screen, StatTile, styles, Tiles } from '../ui/components';
+import { colors } from '../ui/theme';
 
 function isToday(ts: string): boolean {
   const now = new Date();
@@ -28,11 +31,13 @@ function isToday(ts: string): boolean {
 
 export function DashboardScreen() {
   const app = useApp();
+  const navigation = useNavigation<NavigationProp<ParamListBase>>();
   const [exporting, setExporting] = useState<DeliveryPoint | null>(null);
   const { data: latest } = useDbQuery(
     (db) => db.get<ImportSessionRow>('SELECT * FROM import_sessions ORDER BY id DESC LIMIT 1') ?? null,
     [],
   );
+  const { data: alert } = useDbQuery((db) => returnAlert(db), []);
 
   async function onImport() {
     let picked;
@@ -56,11 +61,29 @@ export function DashboardScreen() {
         );
         if (!again) return;
       }
-      const session = await app.runBusy('Импорт отчёта…', () =>
-        processImport(app.db(), name, sha, parseReport(readActiveSheet(bytes))));
+      // Сначала проверка: пустой или чужой отчёт стал бы «последним» и
+      // опустошил бы «Отгрузку» и «Залежавшиеся».
+      const rows = await app.runBusy('Проверка отчёта…', () => parseReport(readActiveSheet(bytes)));
+      const { errors, warnings } = checkReport(rows);
+      if (errors.length) {
+        await app.message('Файл не подходит', `${errors.join('\n\n')}\n\nФайл не загружен, база не изменилась.`);
+        return;
+      }
+      if (warnings.length) {
+        const load = await app.ask(
+          'Проверьте отчёт',
+          `${warnings.join('\n\n')}\n\nЗагрузить файл?`,
+          [{ text: 'Нет', value: false, style: 'cancel' }, { text: 'Да', value: true }],
+          false,
+        );
+        if (!load) return;
+      }
+      const session = await app.runBusy('Импорт отчёта…', () => processImport(app.db(), name, sha, rows));
+      const summary = `Распознано наших посылок: ${session.matched_rows}.\nНовых к отгрузке: ${session.new_to_ship_rows}.`;
+      const [alertCount, overdue] = returnAlert(app.db());
       await app.message(
         'Импорт завершён',
-        `Распознано наших посылок: ${session.matched_rows}.\nНовых к отгрузке: ${session.new_to_ship_rows}.`,
+        alertCount ? `${summary}\n\nСкоро возврат. ${returnAlertText(alertCount, overdue)}` : summary,
       );
     } catch (e) {
       await app.message('Ошибка импорта', `Не удалось импортировать файл:\n${(e as Error).message}`);
@@ -92,6 +115,18 @@ export function DashboardScreen() {
   return (
     <Screen>
       {app.dbError ? <Badge tone="danger" text={`База не открылась: ${app.dbError}`} /> : null}
+      {alert && alert[0] ? (
+        <View style={[styles.card, local.alert]}>
+          <Text style={[styles.cardTitle, local.alertText]}>Скоро возврат</Text>
+          <Text style={[styles.text, local.alertText]}>{returnAlertText(alert[0], alert[1])}</Text>
+          <Button
+            kind="danger"
+            title="Показать посылки"
+            // at — чтобы фильтр выставился и при повторном переходе с теми же параметрами.
+            onPress={() => navigation.navigate('stale', { minDays: ALERT_DAYS, at: Date.now() })}
+          />
+        </View>
+      ) : null}
       <Card title="Загрузите файл от Казакова 68" subtitle="Отчёт склада Ozon (.xlsx) из Загрузок, Telegram или почты.">
         <Button kind="primary" title="Выбрать отчёт" onPress={onImport} />
       </Card>
@@ -129,3 +164,8 @@ export function DashboardScreen() {
     </Screen>
   );
 }
+
+const local = StyleSheet.create({
+  alert: { backgroundColor: colors.dangerSoft, borderColor: colors.danger },
+  alertText: { color: colors.dangerText },
+});

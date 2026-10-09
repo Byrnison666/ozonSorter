@@ -11,7 +11,7 @@ from PySide2.QtWidgets import (
 
 from src.export_service import natural_key
 from src.stale_service import (
-    DANGER_DAYS, POINT_LABELS, WARN_DAYS, StaleShipmentService,
+    ALERT_DAYS, DANGER_DAYS, POINT_LABELS, RETURN_DAYS, WARN_DAYS, StaleShipmentService,
 )
 
 from .theme import Colors, make_badge, make_stat_tile
@@ -29,7 +29,7 @@ _COLUMNS = [
  _CLIENT_COL, _PRODUCT_COL, _POINT_COL) = range(len(_COLUMNS))
 _DAYS_WIDTH = 112
 _CLIENT_WIDTH = 150
-_MIN_DAYS_PRESETS = [0, WARN_DAYS, DANGER_DAYS, 14]
+_MIN_DAYS_PRESETS = [0, WARN_DAYS, DANGER_DAYS, ALERT_DAYS, RETURN_DAYS]
 
 
 class _DaysDelegate(QStyledItemDelegate):
@@ -190,6 +190,12 @@ class StaleScreen(QWidget):
     def showEvent(self, event):
         super().showEvent(event)
         self.refresh()
+
+    def set_min_days(self, days: int):
+        """Выбрать фильтр срока (переход с плашки «Скоро возврат» на «Главной»)."""
+        index = self.min_days_combo.findData(days)
+        if index >= 0:
+            self.min_days_combo.setCurrentIndex(index)
 
     def refresh(self, *_args):
         point = self.point_combo.currentData()

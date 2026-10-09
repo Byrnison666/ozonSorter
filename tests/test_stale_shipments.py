@@ -19,7 +19,7 @@ from src.models import (
 )
 from src.services import ImportService
 from src.stale_service import (
-    StaleShipmentService, StaleRow, COLUMNS, POINT_LABELS,
+    StaleShipmentService, StaleRow, COLUMNS, POINT_LABELS, return_alert_text,
 )
 
 READY = "Готово к выдаче"
@@ -400,6 +400,29 @@ class StaleShipmentsTest(unittest.TestCase):
         imp3 = self.importer.process_import(path1)
         self.assertEqual(self.service.latest_import().id, imp3.id)
         self.assertEqual(self._postings(self.service.list_stale()), ["111-A-1"])
+
+    # --- предупреждение «Скоро возврат» ---
+
+    def test_return_alert_counts_from_10_and_14_days_without_returned(self):
+        self._import_at([("111-A-1", READY, "A-1"), ("111-A-2", READY, "A-2"),
+                         ("222-A-3", READY, "A-3"), ("111-A-4", READY, "A-4"),
+                         ("111-A-5", RETURN, "A-5")])
+        for posting, days in [("111-A-1", 9), ("111-A-2", 10), ("222-A-3", 13),
+                              ("111-A-4", 14), ("111-A-5", 20)]:
+            self._age(posting, days)
+        self.assertEqual(self.service.return_alert(), (3, 1))
+
+    def test_return_alert_empty_without_imports(self):
+        self.assertEqual(self.service.return_alert(), (0, 0))
+
+    def test_return_alert_text(self):
+        self.assertEqual(
+            return_alert_text(3, 1),
+            "Посылок наших клиентов, которые числятся в отчёте склада 10 дней и "
+            "больше: 3, из них 14 дней и больше: 1.\n"
+            "Ozon хранит посылку около 14 дней, затем может вернуть её отправителю. "
+            "Список — в разделе «Залежавшиеся посылки».")
+        self.assertNotIn("из них", return_alert_text(2, 0))
 
 
 if __name__ == "__main__":

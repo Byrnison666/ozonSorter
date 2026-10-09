@@ -68,6 +68,7 @@ ship(anna, "5-1", seen=s1)                           # только в стар�
 ship(anna, "5-2", seen=s1, damaged=True)
 ship(boris, "7-1", name="Кольцевая 1")
 ship(boris, "7-2", damaged=True, first=datetime(2026, 9, 15, 0, 0))
+ship(boris, "7-3", first=datetime(2026, 9, 18, 8, 0))   # 11 дней — «скоро возврат»
 ship(gone, "8-1")                                    # клиент удалён
 ship(None, "9-1", status=S.EXCLUDED_KTY)
 # Равные ключи сортировки: тот же номер и ячейка, разные штрихкоды.
