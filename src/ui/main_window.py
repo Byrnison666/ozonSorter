@@ -15,6 +15,7 @@ from src.yadisk_api import YaDiskError
 
 from .dashboard_screen import DashboardScreen
 from .clients_screen import ClientsScreen
+from .duplicates_screen import DuplicatesScreen
 from .import_log_screen import ImportLogScreen
 from .settings_screen import SettingsScreen, stop_login_threads
 from .stale_screen import StaleScreen
@@ -32,6 +33,7 @@ NAV_STRUCTURE = [
     ("РАБОТА", [
         ("Клиенты", "clients", "users"),
         ("Залежавшиеся посылки", "stale", "clock"),
+        ("Дубли", "duplicates", "copy"),
     ]),
     ("СИСТЕМА", [
         ("Журнал импортов", "import_log", "history"),
@@ -51,6 +53,7 @@ _DB_SCREENS = {
     "dashboard": DashboardScreen,
     "clients": ClientsScreen,
     "stale": StaleScreen,
+    "duplicates": DuplicatesScreen,
     "import_log": ImportLogScreen,
 }
 
@@ -222,7 +225,7 @@ class MainWindow(QMainWindow):
         card_layout.addWidget(self.sync_btn)
         layout.addWidget(self.sync_card)
 
-        footer = QLabel("v1.10.0")
+        footer = QLabel("v1.11.0")
         footer.setObjectName("sidebarFooter")
         layout.addWidget(footer)
 

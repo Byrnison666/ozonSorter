@@ -11,7 +11,8 @@ DEFAULT_DB_PATH = os.path.join(APP_DATA_DIR, 'ozon_sorter.db')
 # Версия схемы, хранится в PRAGMA user_version. Поднимать при каждом изменении
 # схемы: по ней устройства при синхронизации отказываются открывать базу,
 # созданную более новой версией программы.
-SCHEMA_VERSION = 1
+# 2 — статус посылки DUPLICATE: старая версия упала бы на нём при чтении базы.
+SCHEMA_VERSION = 2
 
 class DatabaseManager:
     def __init__(self, db_path: str = DEFAULT_DB_PATH):

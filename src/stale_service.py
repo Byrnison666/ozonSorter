@@ -107,9 +107,13 @@ class StaleShipmentService:
             .where(
                 Shipment.last_seen_import_session_id == latest.id,
                 Client.is_active == True,
+                # Дубли ждут решения в своём разделе, а «Ошибка Ozon» — посылка
+                # уже выдана: забывать на складе тут нечего.
                 Shipment.assignment_status.notin_([
                     AssignmentStatus.EXCLUDED_NOT_OURS,
                     AssignmentStatus.EXCLUDED_KTY,
+                    AssignmentStatus.DUPLICATE,
+                    AssignmentStatus.DELIVERED,
                 ]),
             )
         )

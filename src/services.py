@@ -1,8 +1,9 @@
 import json
 from datetime import datetime
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from sqlalchemy.orm import Session
 from sqlalchemy import select
+from .duplicate_service import DUPLICATE_DAYS, is_incomplete, is_issued
 from .models import (
     Client, Shipment, ImportSession, AssignmentStatus, DeliveryPoint
 )
@@ -12,6 +13,9 @@ class ImportService:
     def __init__(self, db_session: Session):
         self.session = db_session
         self.parser = ExcelParser()
+        # Выданных посылок, которые снова пришли после неполного прошлого отчёта
+        # и не стали дублями (итог последнего process_import).
+        self.skipped_duplicates = 0
 
     def find_duplicate_import(self, file_path: str) -> Optional[ImportSession]:
         """Сессия, в которой этот файл (по sha256) уже импортировали, либо None.
@@ -78,6 +82,13 @@ class ImportService:
         # не только номером, поэтому ключ составной.
         seen_in_file = set()
 
+        # Дубль — выданная посылка, которой не было в прошлом отчёте, а теперь она
+        # снова пришла. Если прошлый отчёт неполный, пропуск только в нём не в счёт.
+        previous_id, before_previous_id = self._previous_sessions(import_session.id)
+        lost, kept = self._missing_in_previous(rows, previous_id, before_previous_id)
+        previous_incomplete = is_incomplete(lost, kept)
+        self.skipped_duplicates = 0
+
         for row_data in rows:
             posting_number = row_data['posting_number']
             product_label = row_data['product_label']
@@ -124,6 +135,18 @@ class ImportService:
             )
 
             if existing_shipment:
+                # До _touch: он перезапишет отметку последнего появления, по
+                # которой виден пропуск.
+                reappeared = False
+                if (is_ready and is_issued(existing_shipment)
+                        and (existing_shipment.last_seen_import_session_id or 0) < previous_id):
+                    if (previous_incomplete
+                            and existing_shipment.last_seen_import_session_id == before_previous_id):
+                        self.skipped_duplicates += 1
+                    else:
+                        reappeared = True
+                previous_seen_at = existing_shipment.last_seen_at
+
                 self._touch(existing_shipment, import_session.id, row_data)
                 if existing_shipment.assignment_status == AssignmentStatus.EXCLUDED_NOT_OURS:
                     # Клиента могли добавить уже после первой встречи посылки.
@@ -149,6 +172,24 @@ class ImportService:
                         existing_shipment.assignment_status = AssignmentStatus.RETURNED
                     existing_shipment.ozon_status = row_data.get('status')
                     import_session.returned_rows += 1
+                elif reappeared:
+                    # Выданная посылка снова пришла: тот же номер, штрихкод и клиент.
+                    days = (import_session.started_at.date() - previous_seen_at.date()).days
+                    existing_shipment.assigned_point = client.fixed_delivery_point
+                    existing_shipment.ozon_status = row_data.get('status')
+                    existing_shipment.first_seen_at = existing_shipment.last_seen_at
+                    if days <= DUPLICATE_DAYS:
+                        # До решения оператора в отгрузку не идёт.
+                        existing_shipment.assignment_status = AssignmentStatus.DUPLICATE
+                        existing_shipment.delivered_at = previous_seen_at
+                        logs.append(f"DUPLICATE: Shipment {posting_number} was issued and reappeared in import.")
+                    else:
+                        # Давно выдана — это уже новая посылка.
+                        existing_shipment.assignment_status = AssignmentStatus.TO_SHIP
+                        existing_shipment.exported_import_session_id = None
+                        existing_shipment.delivered_at = None
+                        import_session.new_to_ship_rows += 1
+                        logs.append(f"Shipment {posting_number} reappeared {days} days after issue, shipping as new.")
                 elif existing_shipment.assignment_status == AssignmentStatus.ON_POINT:
                     import_session.already_on_point += 1
                     logs.append(f"Shipment {posting_number} already on point.")
@@ -165,9 +206,9 @@ class ImportService:
                     existing_shipment.exported_import_session_id = None
                     import_session.new_to_ship_rows += 1
                 else:
-                    # Ещё не привезённая посылка (TO_SHIP/TO_ASSIGN): синхронизируем
-                    # точку с актуальной у клиента — если её сменили, посылка не
-                    # должна уехать на старую точку.
+                    # Ещё не привезённая посылка (TO_SHIP/TO_ASSIGN) или дубль без
+                    # решения: синхронизируем точку с актуальной у клиента — если
+                    # её сменили, посылка не должна уехать на старую точку.
                     existing_shipment.assigned_point = client.fixed_delivery_point
             elif is_ready:
                 # Новая посылка, готова к выдаче: к отгрузке на точку клиента.
@@ -191,10 +232,44 @@ class ImportService:
                 )
                 import_session.returned_rows += 1
                 
+        if previous_incomplete:
+            logs.append(
+                f"WARNING: Previous import looks incomplete: {lost} of {lost + kept} shipments missing. "
+                f"Not treated as duplicates: {self.skipped_duplicates}."
+            )
         import_session.finished_at = datetime.now()
         import_session.log_json = json.dumps(logs)
         self.session.commit()
         return import_session
+
+    def _previous_sessions(self, session_id: int) -> Tuple[int, Optional[int]]:
+        """(id прошлого импорта, id позапрошлого); 0 и None — таких нет."""
+        ids = self.session.execute(
+            select(ImportSession.id)
+            .where(ImportSession.id < session_id)
+            .order_by(ImportSession.id.desc())
+            .limit(2)
+        ).scalars().all()
+        return (ids[0] if ids else 0), (ids[1] if len(ids) > 1 else None)
+
+    def _missing_in_previous(self, rows: List[Dict[str, Any]], previous_id: int,
+                             before_previous_id: Optional[int]) -> Tuple[int, int]:
+        """(lost, kept) по уникальным посылкам текущего отчёта, включая чужие и
+        КТЯ: lost — были в позапрошлом отчёте, но не в прошлом; kept — были в
+        прошлом. Много lost — прошлый отчёт пришёл неполным."""
+        if before_previous_id is None:
+            return 0, 0
+        last_seen = {
+            (posting_number, product_label): session_id
+            for posting_number, product_label, session_id in self.session.execute(
+                select(Shipment.posting_number, Shipment.product_label,
+                       Shipment.last_seen_import_session_id)
+                .where(Shipment.last_seen_import_session_id.in_((previous_id, before_previous_id)))
+            ).all()
+        }
+        keys = {(row['posting_number'], row['product_label']) for row in rows}
+        seen = [last_seen.get(key) for key in keys]
+        return seen.count(before_previous_id), seen.count(previous_id)
 
     def _touch(self, shipment: Shipment, session_id: int, row_data: Dict[str, Any]):
         """Отметить, что посылка встречена в текущем импорте (без смены статуса)."""

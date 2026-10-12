@@ -15,6 +15,9 @@ from src.sync_service import _ALLOWED_TABLES
 # отстаёт от моделей, а Android-приложение получает чёткий сигнал об изменении.
 EXPECTED_FINGERPRINTS = {
     1: "e180ec1d6c3d1c68",
+    # Новое значение enum отпечаток не меняет (VARCHAR той же длины), но старые
+    # версии не знают статус DUPLICATE.
+    2: "e180ec1d6c3d1c68",
 }
 
 

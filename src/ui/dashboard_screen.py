@@ -6,6 +6,9 @@ from PySide2.QtWidgets import (
     QLabel, QFileDialog, QMessageBox, QFrame, QGridLayout
 )
 
+from src.duplicate_service import (
+    DuplicateService, duplicates_alert_text, incomplete_report_text,
+)
 from src.export_service import ExportService
 from src.models import DeliveryPoint
 from src.parser import ExcelParser
@@ -42,32 +45,19 @@ class DashboardScreen(QWidget):
 
         layout.addLayout(header)
 
-        # --- «Скоро возврат»: наши посылки, которые Ozon скоро может вернуть ---
-        self.alert_banner = QFrame()
-        self.alert_banner.setObjectName("alertBanner")
-        alert_layout = QHBoxLayout(self.alert_banner)
-        alert_layout.setContentsMargins(16, 14, 16, 14)
-        alert_layout.setSpacing(16)
-        alert_layout.addWidget(
-            icon_label("triangle-alert", Colors.ON_PRIMARY, 20, 40, "alertIcon"), 0, Qt.AlignVCenter
+        # --- Дубли: выданные посылки снова пришли в отчёте склада ---
+        self.duplicates_banner, self.duplicates_label = self._make_banner(
+            "copy", "Дубли", "Разобрать дубли",
+            lambda: self.main_window.go_to("duplicates"),
         )
-        alert_texts = QVBoxLayout()
-        alert_texts.setSpacing(4)
-        alert_title = QLabel("Скоро возврат")
-        alert_title.setObjectName("alertTitle")
-        alert_texts.addWidget(alert_title)
-        self.alert_label = QLabel("")
-        self.alert_label.setObjectName("alertText")
-        self.alert_label.setWordWrap(True)
-        alert_texts.addWidget(self.alert_label)
-        alert_layout.addLayout(alert_texts, 1)
-        alert_btn = QPushButton("Показать посылки")
-        alert_btn.setObjectName("secondary")
-        set_button_icon(alert_btn, "arrow-right", Colors.TEXT)
-        alert_btn.clicked.connect(self.main_window.show_return_alert)
-        alert_layout.addWidget(alert_btn, 0, Qt.AlignVCenter)
+        layout.addWidget(self.duplicates_banner)
+
+        # --- «Скоро возврат»: наши посылки, которые Ozon скоро может вернуть ---
+        self.alert_banner, self.alert_label = self._make_banner(
+            "triangle-alert", "Скоро возврат", "Показать посылки",
+            self.main_window.show_return_alert,
+        )
         layout.addWidget(self.alert_banner)
-        self.alert_banner.setVisible(False)
 
         work_row = QHBoxLayout()
         work_row.setSpacing(20)
@@ -136,7 +126,6 @@ class DashboardScreen(QWidget):
 
         self.export_koms_btn = QPushButton("Excel для Комсомольской 4")
         self.export_koms_btn.setObjectName("secondary")
-        self.export_koms_btn.setMinimumHeight(44)
         set_button_icon(self.export_koms_btn, "download", Colors.PRIMARY)
         self.export_koms_btn.clicked.connect(
             lambda: self.on_export(DeliveryPoint.KOMSOMOLSKAYA_4)
@@ -145,7 +134,6 @@ class DashboardScreen(QWidget):
 
         self.export_kolt_btn = QPushButton("Excel для Кольцевой 16")
         self.export_kolt_btn.setObjectName("secondary")
-        self.export_kolt_btn.setMinimumHeight(44)
         set_button_icon(self.export_kolt_btn, "download", Colors.PRIMARY)
         self.export_kolt_btn.clicked.connect(
             lambda: self.on_export(DeliveryPoint.KOLTSEVAYA_16)
@@ -209,9 +197,51 @@ class DashboardScreen(QWidget):
         grid.addWidget(frame, row, column)
         return frame, value
 
+    @staticmethod
+    def _make_banner(icon, title, button_text, on_click):
+        """Плашка-предупреждение (скрыта). Возвращает (плашка, метка текста)."""
+        banner = QFrame()
+        banner.setObjectName("alertBanner")
+        banner_layout = QHBoxLayout(banner)
+        banner_layout.setContentsMargins(16, 14, 16, 14)
+        banner_layout.setSpacing(16)
+        banner_layout.addWidget(
+            icon_label(icon, Colors.ON_PRIMARY, 20, 40, "alertIcon"), 0, Qt.AlignVCenter
+        )
+        texts = QVBoxLayout()
+        texts.setSpacing(4)
+        title_label = QLabel(title)
+        title_label.setObjectName("alertTitle")
+        texts.addWidget(title_label)
+        text_label = QLabel("")
+        text_label.setObjectName("alertText")
+        text_label.setWordWrap(True)
+        texts.addWidget(text_label)
+        banner_layout.addLayout(texts, 1)
+        button = QPushButton(button_text)
+        button.setObjectName("secondary")
+        set_button_icon(button, "arrow-right", Colors.TEXT)
+        button.clicked.connect(on_click)
+        banner_layout.addWidget(button, 0, Qt.AlignVCenter)
+        banner.setVisible(False)
+        return banner, text_label
+
     def showEvent(self, event):
         super().showEvent(event)
+        self.refresh_duplicates_alert()
         self.refresh_return_alert()
+
+    def refresh_duplicates_alert(self):
+        """Показать плашку «Дубли». Возвращает её текст ('' — нечего)."""
+        session = self.db_manager.get_session()
+        try:
+            count = len(DuplicateService(session).list_duplicates())
+        finally:
+            session.close()
+        text = duplicates_alert_text(count) if count else ""
+        self.duplicates_label.setText(text)
+        self.duplicates_banner.setVisible(bool(count))
+        return text
 
     def refresh_return_alert(self):
         """Показать плашку «Скоро возврат». Возвращает её текст ('' — нечего)."""
@@ -284,10 +314,18 @@ class DashboardScreen(QWidget):
             f"Распознано наших посылок: {session.matched_rows}.\n"
             f"Новых к отгрузке: {session.new_to_ship_rows}."
         )
+        alerts = []
+        duplicates_text = self.refresh_duplicates_alert()
+        if duplicates_text:
+            alerts.append("Дубли. " + duplicates_text)
+        if self.import_service.skipped_duplicates:
+            alerts.append(incomplete_report_text(self.import_service.skipped_duplicates))
         alert_text = self.refresh_return_alert()
         if alert_text:
+            alerts.append("Скоро возврат. " + alert_text)
+        if alerts:
             QMessageBox.warning(self, "Импорт завершён",
-                                summary + "\n\nСкоро возврат. " + alert_text)
+                                "\n\n".join([summary] + alerts))
         else:
             QMessageBox.information(self, "Импорт завершён", summary)
         # Последним действием: синхронизация может заменить базу и пересоздать

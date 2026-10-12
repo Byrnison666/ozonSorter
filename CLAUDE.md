@@ -43,6 +43,8 @@ WINEPREFIX=~/.wine-ozon wine C:\\Python310\\python.exe -m PyInstaller OzonSorter
 - **«Скоро возврат».** `StaleShipmentService.return_alert`: не-возвраты из последнего отчёта от `ALERT_DAYS` (10), из них от `RETURN_DAYS` (14) — Ozon хранит ~14 дней. Показ: после импорта и плашка на «Главной» → «Залежавшиеся» с фильтром 10. Даты начала хранения в отчёте нет — дни от `first_seen_at`, могут быть занижены.
 - **SheetJS и `<dimension>`.** Генератор отчётов Ozon оставляет в `<dimension>` размер шаблона (`B1:J6`); openpyxl его игнорирует, SheetJS обрезает `!ref` → 0 строк. `mobile/src/core/sheet.ts` расширяет диапазон по ключам ячеек.
 - **Дедуп между отчётами.** `Shipment.exported_import_session_id`: `generate_export` берёт `TO_SHIP` с `last_seen==текущая` и (`exported_import_session_id IS NULL` или `==текущая`), затем помечает. «Остатки на складе» не выгружаются повторно.
+- **Дубли** (`src/duplicate_service.py`, телефон — `src/core/duplicates.ts`). Выгруженная посылка (`exported_import_session_id` есть), которой не было в прошлом отчёте, снова пришла не позже `DUPLICATE_DAYS` (30) от `last_seen_at` → `DUPLICATE`, `delivered_at` = прошлый `last_seen_at`. `DELIVERED` (решение «Ошибка Ozon»), который пропадал из отчёта, тоже снова становится дублем. Позже 30 дней → новая посылка (`TO_SHIP`, `exported=NULL`). До решения оператора («Отгрузить» → `TO_SHIP`, «Ошибка Ozon» → `DELIVERED`) в отгрузку и «Залежавшиеся» не идёт. Ложный дубль от неполного отчёта: если посылки не было только в прошлом отчёте, а он неполный (`is_incomplete`: выпало ≥5 и ≥5% посылок позапрошлого), дублем не считается — `skipped_duplicates` + WARNING в журнале. Пороги стоит откалибровать на настоящих отчётах.
+- **Версия схемы** — `SCHEMA_VERSION` в `PRAGMA user_version` (сейчас 2, с дублями). ПК поднимает её при открытии базы, телефон схему существующей базы не трогает — версию поднимает его импорт. Базу новее себя ни одно устройство не открывает и с Диска не берёт → устройства обновлять вместе.
 - **Формат экспорта «Отгрузка <ТОЧКА>»** (заказчик): A=описание (`product_name`), B=номер, C=штрихкод, D=ячейка, E=повреждение. Столбца «Статус» быть НЕ должно.
 
 ## Оформление (с 1.10.0 / телефон 1.2.0)
@@ -56,6 +58,7 @@ WINEPREFIX=~/.wine-ozon wine C:\\Python310\\python.exe -m PyInstaller OzonSorter
 ## Проверка
 
 - Dev: запуск по команде выше, прогон тестов (`.venv/bin/python -m unittest discover -s tests`).
+- `src/database.py`, `src/models.py`, `src/services.py`, `src/export_service.py` — с окончаниями CRLF (в `services.py` есть и LF-строки). Правки скриптом — сохранять окончания, иначе diff на весь файл.
 - Перед отдачей заказчику — проверить на реальной Win8.1 (Wine ≠ Windows: файловые диалоги + openpyxl). Разовые миграции БД тестировать на копии боевой базы.
 
 ## Android-приложение (`mobile/`)
