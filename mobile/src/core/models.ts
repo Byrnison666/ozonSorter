@@ -23,6 +23,10 @@ export const AssignmentStatus = {
   DELIVERED: 'DELIVERED',
   // Наша посылка, но в отчёте склада — возврат: в отгрузку не идёт.
   RETURNED: 'RETURNED',
+  // Выданная посылка снова пришла в отчёте склада (тот же номер и штрихкод) в
+  // течение DUPLICATE_DAYS после выдачи. В отгрузку не идёт, пока оператор не
+  // решит: «Отгрузить» (→ TO_SHIP) или «Ошибка Ozon» (→ DELIVERED).
+  DUPLICATE: 'DUPLICATE',
   EXCLUDED_NOT_OURS: 'EXCLUDED_NOT_OURS',
   EXCLUDED_KTY: 'EXCLUDED_KTY',
 } as const;

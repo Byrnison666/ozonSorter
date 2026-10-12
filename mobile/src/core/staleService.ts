@@ -37,7 +37,7 @@ export interface StaleRow {
 }
 
 /** Число дней между датами (без времени) двух меток времени из базы. */
-function daysBetween(later: string, earlier: string): number {
+export function daysBetween(later: string, earlier: string): number {
   const day = (ts: string) => Date.UTC(+ts.slice(0, 4), +ts.slice(5, 7) - 1, +ts.slice(8, 10));
   return Math.round((day(later) - day(earlier)) / 86_400_000);
 }
@@ -78,15 +78,18 @@ export function listStale(db: Db, point: DeliveryPoint | null = null, minDays = 
   if (!latest) return [];
   // Дни — до даты последнего отчёта, а не до сегодня: без нового отчёта
   // результат не меняется сам по себе.
+  // Дубли ждут решения в своём разделе, а «Ошибка Ozon» — посылка уже выдана:
+  // забывать на складе тут нечего.
   const params: Array<string | number> = [
     latest.id, AssignmentStatus.EXCLUDED_NOT_OURS, AssignmentStatus.EXCLUDED_KTY,
+    AssignmentStatus.DUPLICATE, AssignmentStatus.DELIVERED,
   ];
   let sql =
     'SELECT s.cell, s.posting_number, s.product_label, s.product_name, s.assigned_point, ' +
     's.first_seen_at, s.assignment_status, c.full_name, c.ozon_client_id, c.phone ' +
     'FROM shipments s JOIN clients c ON s.client_id = c.id ' +
     'WHERE s.last_seen_import_session_id = ? AND c.is_active = 1 ' +
-    'AND s.assignment_status NOT IN (?, ?)';
+    'AND s.assignment_status NOT IN (?, ?, ?, ?)';
   if (point !== null) {
     sql += ' AND s.assigned_point = ?';
     params.push(point);

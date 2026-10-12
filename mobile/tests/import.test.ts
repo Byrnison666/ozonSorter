@@ -35,13 +35,14 @@ describe('импорт отчёта совпадает с ПК', () => {
   function importBoth(step: string, file: string) {
     return clock.run(step, () => {
       const pc = JSON.parse(runPythonScript('import_step.py', pcDb, file));
-      let phone: { session_id?: number; error?: string };
+      let phone: { session_id?: number; skipped_duplicates?: number; error?: string };
       try {
         const bytes = new Uint8Array(readFileSync(file));
         const sha = createHash('sha256').update(bytes).digest('hex');
-        phone = withPhone(phoneDb, (db) => ({
-          session_id: processImport(db, basename(file), sha, parseReport(readActiveSheet(bytes))).id,
-        }));
+        phone = withPhone(phoneDb, (db) => {
+          const result = processImport(db, basename(file), sha, parseReport(readActiveSheet(bytes)));
+          return { session_id: result.session.id, skipped_duplicates: result.skippedDuplicates };
+        });
       } catch (e) {
         if (!(e instanceof ImportError)) throw e;
         phone = { error: e.message };

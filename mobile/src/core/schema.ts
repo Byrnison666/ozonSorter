@@ -4,7 +4,7 @@ import type { Db } from './db';
  * Версия схемы — PRAGMA user_version, как SCHEMA_VERSION в src/database.py на ПК.
  * Поднимать синхронно с ПК.
  */
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 /**
  * DDL свежей базы ПК (SQLAlchemy create_all + _migrate), дословно. Совпадение

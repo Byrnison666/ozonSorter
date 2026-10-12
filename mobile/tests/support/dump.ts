@@ -7,7 +7,7 @@ import { openBunDb } from './bunDb';
 
 const TIMESTAMP_COLUMNS = new Set([
   'started_at', 'finished_at', 'first_seen_at', 'last_seen_at',
-  'created_at', 'updated_at', 'export_date',
+  'created_at', 'updated_at', 'export_date', 'delivered_at',
 ]);
 const TS_RE = /^(\d{4})-(\d\d)-(\d\d) (\d\d):(\d\d):(\d\d)\.(\d{6})$/;
 

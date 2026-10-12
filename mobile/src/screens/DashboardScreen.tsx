@@ -9,6 +9,7 @@ import { useState } from 'react';
 import { StyleSheet, View } from 'react-native';
 
 import { useApp, useDbQuery } from '../app/AppContext';
+import { duplicatesAlertText, incompleteReportText, listDuplicates } from '../core/duplicates';
 import {
   commitExport, defaultExportFileName, prepareExport,
 } from '../core/exportService';
@@ -21,9 +22,29 @@ import { formatTime } from '../core/sync/flow';
 import { sha256 } from '../platform/deps';
 import { pickXlsx, shareXlsx } from '../platform/io';
 import {
-  Badge, Button, Card, Icon, Screen, StatTile, styles, Text, Tiles,
+  Badge, Button, Card, Icon, type IconName, Screen, StatTile, styles, Text, Tiles,
 } from '../ui/components';
 import { colors, radius, type } from '../ui/theme';
+
+/** Жёлтая плашка-предупреждение с переходом к посылкам (alertBanner ПК). */
+function AlertBanner({ icon, title, text, button, onPress }: {
+  icon: IconName; title: string; text: string; button: string; onPress: () => void;
+}) {
+  return (
+    <View style={local.alert}>
+      <View style={local.row}>
+        <View style={[local.bubble, local.alertBubble]}>
+          <Icon name={icon} size={18} color={colors.onPrimary} />
+        </View>
+        <View style={local.textCol}>
+          <Text style={local.alertTitle}>{title}</Text>
+          <Text style={local.alertText}>{text}</Text>
+        </View>
+      </View>
+      <Button icon="arrow-right" title={button} onPress={onPress} />
+    </View>
+  );
+}
 
 function isToday(ts: string): boolean {
   const now = new Date();
@@ -40,6 +61,7 @@ export function DashboardScreen() {
     [],
   );
   const { data: alert } = useDbQuery((db) => returnAlert(db), []);
+  const { data: duplicates } = useDbQuery((db) => listDuplicates(db).length, []);
 
   async function onImport() {
     let picked;
@@ -51,6 +73,7 @@ export function DashboardScreen() {
     }
     if (!picked) return;
     const { name, bytes } = picked;
+    let openDuplicates = false;
     try {
       const sha = await sha256(bytes);
       const dup = findDuplicateImport(app.db(), sha);
@@ -80,17 +103,29 @@ export function DashboardScreen() {
         );
         if (!load) return;
       }
-      const session = await app.runBusy('Импорт отчёта…', () => processImport(app.db(), name, sha, rows));
-      const summary = `Распознано наших посылок: ${session.matched_rows}.\nНовых к отгрузке: ${session.new_to_ship_rows}.`;
-      const [alertCount, overdue] = returnAlert(app.db());
-      await app.message(
-        'Импорт завершён',
-        alertCount ? `${summary}\n\nСкоро возврат. ${returnAlertText(alertCount, overdue)}` : summary,
+      const { session, skippedDuplicates } = await app.runBusy(
+        'Импорт отчёта…', () => processImport(app.db(), name, sha, rows),
       );
+      const summary = `Распознано наших посылок: ${session.matched_rows}.\nНовых к отгрузке: ${session.new_to_ship_rows}.`;
+      const alerts: string[] = [];
+      const duplicateCount = listDuplicates(app.db()).length;
+      if (duplicateCount) alerts.push(`Дубли. ${duplicatesAlertText(duplicateCount)}`);
+      if (skippedDuplicates) alerts.push(incompleteReportText(skippedDuplicates));
+      const [alertCount, overdue] = returnAlert(app.db());
+      if (alertCount) alerts.push(`Скоро возврат. ${returnAlertText(alertCount, overdue)}`);
+      const text = [summary, ...alerts].join('\n\n');
+      if (duplicateCount) {
+        openDuplicates = await app.ask('Импорт завершён', text, [
+          { text: 'Позже', value: false, style: 'cancel' }, { text: 'Разобрать дубли', value: true },
+        ], false);
+      } else {
+        await app.message('Импорт завершён', text);
+      }
     } catch (e) {
       await app.message('Ошибка импорта', `Не удалось импортировать файл:\n${(e as Error).message}`);
       return;
     }
+    if (openDuplicates) navigation.navigate('duplicates');
     // Последним действием: синхронизация может заменить базу.
     app.onDataChanged();
   }
@@ -117,24 +152,24 @@ export function DashboardScreen() {
   return (
     <Screen>
       {app.dbError ? <Badge tone="danger" text={`База не открылась: ${app.dbError}`} /> : null}
+      {duplicates ? (
+        <AlertBanner
+          icon="copy"
+          title="Дубли"
+          text={duplicatesAlertText(duplicates)}
+          button="Разобрать дубли"
+          onPress={() => navigation.navigate('duplicates')}
+        />
+      ) : null}
       {alert && alert[0] ? (
-        <View style={local.alert}>
-          <View style={local.row}>
-            <View style={[local.bubble, local.alertBubble]}>
-              <Icon name="alert-triangle" size={18} color={colors.onPrimary} />
-            </View>
-            <View style={local.textCol}>
-              <Text style={local.alertTitle}>Скоро возврат</Text>
-              <Text style={local.alertText}>{returnAlertText(alert[0], alert[1])}</Text>
-            </View>
-          </View>
-          <Button
-            icon="arrow-right"
-            title="Показать посылки"
-            // at — чтобы фильтр выставился и при повторном переходе с теми же параметрами.
-            onPress={() => navigation.navigate('stale', { minDays: ALERT_DAYS, at: Date.now() })}
-          />
-        </View>
+        <AlertBanner
+          icon="alert-triangle"
+          title="Скоро возврат"
+          text={returnAlertText(alert[0], alert[1])}
+          button="Показать посылки"
+          // at — чтобы фильтр выставился и при повторном переходе с теми же параметрами.
+          onPress={() => navigation.navigate('stale', { minDays: ALERT_DAYS, at: Date.now() })}
+        />
       ) : null}
       <View style={local.hero}>
         <View style={local.row}>

@@ -7,6 +7,7 @@ import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-cont
 import { AppProvider, useApp } from './src/app/AppContext';
 import { ClientsScreen } from './src/screens/ClientsScreen';
 import { DashboardScreen } from './src/screens/DashboardScreen';
+import { DuplicatesScreen } from './src/screens/DuplicatesScreen';
 import { ImportLogScreen } from './src/screens/ImportLogScreen';
 import { SettingsScreen } from './src/screens/SettingsScreen';
 import { StaleScreen } from './src/screens/StaleScreen';
@@ -45,12 +46,16 @@ function SyncButton() {
   );
 }
 
-const TABS: Array<{ name: string; title: string; icon: IconName; component: () => React.JSX.Element }> = [
+const TABS: Array<{
+  name: string; title: string; icon: IconName; component: () => React.JSX.Element; hidden?: boolean;
+}> = [
   { name: 'dashboard', title: 'Главная', icon: 'home', component: DashboardScreen },
   { name: 'clients', title: 'Клиенты', icon: 'users', component: ClientsScreen },
   { name: 'stale', title: 'Залежалые', icon: 'clock', component: StaleScreen },
   { name: 'log', title: 'Журнал', icon: 'list', component: ImportLogScreen },
   { name: 'settings', title: 'Настройки', icon: 'settings', component: SettingsScreen },
+  // Без кнопки в панели: вход с плашки «Главной» и из окна после импорта.
+  { name: 'duplicates', title: 'Дубли', icon: 'copy', component: DuplicatesScreen, hidden: true },
 ];
 
 function Tabs() {
@@ -77,7 +82,7 @@ function Tabs() {
           key={t.name}
           name={t.name}
           component={t.component}
-          options={{
+          options={({ navigation }) => ({
             title: t.name === 'stale' ? 'Залежавшиеся посылки' : t.name === 'log' ? 'Журнал импортов' : t.title,
             tabBarLabel: ({ focused, color }) => (
               <Text style={[s.tabLabel, { color }, focused && s.tabLabelActive]}>{t.title}</Text>
@@ -87,7 +92,22 @@ function Tabs() {
                 <Icon name={t.icon} size={22} color={color} />
               </View>
             ),
-          }}
+            ...(t.hidden ? {
+              tabBarItemStyle: { display: 'none' },
+              headerLeft: () => (
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Назад"
+                  onPress={() => navigation.navigate('dashboard')}
+                  hitSlop={8}
+                  style={({ pressed }) => [s.bubble, pressed && s.bubblePressed]}
+                >
+                  <Icon name="arrow-left" size={20} color={colors.text} />
+                </Pressable>
+              ),
+              headerLeftContainerStyle: { paddingLeft: 16 },
+            } as const : {}),
+          })}
         />
       ))}
     </Tab.Navigator>

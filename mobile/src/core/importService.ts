@@ -3,9 +3,12 @@
  * Результат в базе должен совпадать с ПК построчно: проверяет tests/import.test.ts.
  */
 import type { Db, SqlValue } from './db';
+import { DUPLICATE_DAYS, isIncomplete, isIssued } from './duplicates';
 import { type CellValue, PyDateTime, PyTime, pyJsonDumpsStrings, pyStr, pyStrip } from './py';
 import { AssignmentStatus, type Clock, systemClock } from './models';
 import { isReadyForPickup, normalizeOzonId, type ParsedRow } from './parser';
+import { SCHEMA_VERSION } from './schema';
+import { daysBetween } from './staleService';
 
 export class ImportError extends Error {}
 
@@ -26,9 +29,18 @@ export interface ImportSessionRow {
   log_json: string | null;
 }
 
+export interface ImportResult {
+  session: ImportSessionRow;
+  /** Выданных посылок, которые снова пришли после неполного прошлого отчёта и не стали дублями. */
+  skippedDuplicates: number;
+}
+
 interface ShipmentState {
   id: number;
   assignment_status: AssignmentStatus;
+  exported_import_session_id: number | null;
+  last_seen_import_session_id: number | null;
+  last_seen_at: string;
 }
 
 interface ClientRef {
@@ -62,6 +74,47 @@ function fileKey(row: ParsedRow): string {
   return JSON.stringify([kind, value, row.product_label]);
 }
 
+/** (id прошлого импорта, id позапрошлого); 0 и null — таких нет. */
+function previousSessions(db: Db, sessionId: number): [number, number | null] {
+  const ids = db.all<{ id: number }>(
+    'SELECT id FROM import_sessions WHERE id < ? ORDER BY id DESC LIMIT 2', [sessionId],
+  ).map((r) => r.id);
+  return [ids[0] ?? 0, ids[1] ?? null];
+}
+
+/**
+ * [lost, kept] по уникальным посылкам отчёта, включая чужие и КТЯ: lost — были
+ * в позапрошлом отчёте, но не в прошлом; kept — были в прошлом. Много lost —
+ * прошлый отчёт пришёл неполным.
+ */
+function missingInPrevious(
+  db: Db, rows: ParsedRow[], previousId: number, beforePreviousId: number | null,
+): [number, number] {
+  if (beforePreviousId === null) return [0, 0];
+  const lastSeen = new Map<string, number>();
+  for (const s of db.all<{ posting_number: string; product_label: string | null; last_seen_import_session_id: number }>(
+    'SELECT posting_number, product_label, last_seen_import_session_id FROM shipments ' +
+      'WHERE last_seen_import_session_id IN (?, ?)',
+    [previousId, beforePreviousId],
+  )) {
+    lastSeen.set(JSON.stringify([s.posting_number, s.product_label]), s.last_seen_import_session_id);
+  }
+  let lost = 0;
+  let kept = 0;
+  const keys = new Set<string>();
+  for (const row of rows) {
+    // В Python ключ — кортеж из значения ячейки: номер-число не равен строке из базы.
+    if (typeof row.posting_number !== 'string') continue;
+    const key = JSON.stringify([row.posting_number, row.product_label]);
+    if (keys.has(key)) continue;
+    keys.add(key);
+    const seen = lastSeen.get(key);
+    if (seen === beforePreviousId) lost++;
+    else if (seen === previousId) kept++;
+  }
+  return [lost, kept];
+}
+
 export function findDuplicateImport(db: Db, sha256: string): ImportSessionRow | undefined {
   return db.get<ImportSessionRow>(
     'SELECT * FROM import_sessions WHERE source_file_sha256 = ?', [sha256],
@@ -74,15 +127,23 @@ export function findDuplicateImport(db: Db, sha256: string): ImportSessionRow | 
  */
 export function processImport(
   db: Db, fileName: string, sha256: string, rows: ParsedRow[], clock: Clock = systemClock,
-): ImportSessionRow {
+): ImportResult {
   let sessionId = 0;
+  let skippedDuplicates = 0;
   db.transaction(() => {
+    // Импорт может записать статус DUPLICATE, которого нет у программ схемы 1:
+    // такую базу они должны отвергнуть, а не упасть на ней (на ПК версию
+    // поднимает открытие базы).
+    if (db.get<{ user_version: number }>('PRAGMA user_version')!.user_version < SCHEMA_VERSION) {
+      db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    }
+    const startedAt = clock.now().toSql();
     sessionId = db.run(
       'INSERT INTO import_sessions (source_file_name, source_file_sha256, started_at, ' +
         'finished_at, total_rows, kty_rows, matched_rows, new_to_ship_rows, already_on_point, ' +
         'returned_rows, not_ours_rows, errors_rows, log_json) ' +
         'VALUES (?, ?, ?, NULL, 0, 0, 0, 0, 0, 0, 0, 0, NULL)',
-      [fileName, sha256, clock.now().toSql()],
+      [fileName, sha256, startedAt],
     ).lastInsertRowId;
 
     const counters = {
@@ -135,6 +196,12 @@ export function processImport(
       );
     };
 
+    // Дубль — выданная посылка, которой не было в прошлом отчёте, а теперь она
+    // снова пришла. Если прошлый отчёт неполный, пропуск только в нём не в счёт.
+    const [previousId, beforePreviousId] = previousSessions(db, sessionId);
+    const [lost, kept] = missingInPrevious(db, rows, previousId, beforePreviousId);
+    const previousIncomplete = isIncomplete(lost, kept);
+
     const seenInFile = new Set<string>();
     for (const row of rows) {
       const key = fileKey(row);
@@ -142,7 +209,8 @@ export function processImport(
       seenInFile.add(key);
 
       const existing = db.get<ShipmentState>(
-        'SELECT id, assignment_status FROM shipments WHERE posting_number = ? AND product_label = ?',
+        'SELECT id, assignment_status, exported_import_session_id, last_seen_import_session_id, ' +
+          'last_seen_at FROM shipments WHERE posting_number = ? AND product_label = ?',
         [bindCell(row.posting_number), row.product_label],
       );
 
@@ -166,6 +234,17 @@ export function processImport(
       const status = bindCell(row.status);
 
       if (existing) {
+        // До touch: он перезапишет отметку последнего появления, по которой виден пропуск.
+        let reappeared = false;
+        if (isReady && isIssued(existing) && (existing.last_seen_import_session_id ?? 0) < previousId) {
+          if (previousIncomplete && existing.last_seen_import_session_id === beforePreviousId) {
+            skippedDuplicates++;
+          } else {
+            reappeared = true;
+          }
+        }
+        const previousSeenAt = existing.last_seen_at;
+
         touch(existing.id, row);
         const current = existing.assignment_status;
         if (current === AssignmentStatus.EXCLUDED_NOT_OURS) {
@@ -193,6 +272,31 @@ export function processImport(
           }
           db.run('UPDATE shipments SET ozon_status = ? WHERE id = ?', [status, existing.id]);
           counters.returned_rows++;
+        } else if (reappeared) {
+          // Выданная посылка снова пришла: тот же номер, штрихкод и клиент.
+          const days = daysBetween(startedAt, previousSeenAt);
+          db.run(
+            'UPDATE shipments SET assigned_point = ?, ozon_status = ?, first_seen_at = last_seen_at ' +
+              'WHERE id = ?',
+            [client.fixed_delivery_point, status, existing.id],
+          );
+          if (days <= DUPLICATE_DAYS) {
+            // До решения оператора в отгрузку не идёт.
+            db.run('UPDATE shipments SET assignment_status = ?, delivered_at = ? WHERE id = ?',
+              [AssignmentStatus.DUPLICATE, previousSeenAt, existing.id]);
+            logs.push(`DUPLICATE: Shipment ${pyStr(row.posting_number)} was issued and reappeared in import.`);
+          } else {
+            // Давно выдана — это уже новая посылка.
+            db.run(
+              'UPDATE shipments SET assignment_status = ?, exported_import_session_id = NULL, ' +
+                'delivered_at = NULL WHERE id = ?',
+              [AssignmentStatus.TO_SHIP, existing.id],
+            );
+            counters.new_to_ship_rows++;
+            logs.push(
+              `Shipment ${pyStr(row.posting_number)} reappeared ${days} days after issue, shipping as new.`,
+            );
+          }
         } else if (current === AssignmentStatus.ON_POINT) {
           counters.already_on_point++;
           logs.push(`Shipment ${pyStr(row.posting_number)} already on point.`);
@@ -209,7 +313,7 @@ export function processImport(
           );
           counters.new_to_ship_rows++;
         } else {
-          // Ещё не привезена: точка — актуальная у клиента.
+          // Ещё не привезена или дубль без решения: точка — актуальная у клиента.
           db.run('UPDATE shipments SET assigned_point = ? WHERE id = ?',
             [client.fixed_delivery_point, existing.id]);
         }
@@ -222,6 +326,12 @@ export function processImport(
       }
     }
 
+    if (previousIncomplete) {
+      logs.push(
+        `WARNING: Previous import looks incomplete: ${lost} of ${lost + kept} shipments missing. ` +
+          `Not treated as duplicates: ${skippedDuplicates}.`,
+      );
+    }
     db.run(
       'UPDATE import_sessions SET total_rows = ?, kty_rows = ?, matched_rows = ?, ' +
         'new_to_ship_rows = ?, already_on_point = ?, returned_rows = ?, not_ours_rows = ?, ' +
@@ -233,5 +343,8 @@ export function processImport(
       ],
     );
   });
-  return db.get<ImportSessionRow>('SELECT * FROM import_sessions WHERE id = ?', [sessionId])!;
+  return {
+    session: db.get<ImportSessionRow>('SELECT * FROM import_sessions WHERE id = ?', [sessionId])!,
+    skippedDuplicates,
+  };
 }
