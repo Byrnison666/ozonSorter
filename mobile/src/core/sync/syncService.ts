@@ -376,6 +376,11 @@ export class SyncService {
     return this.localDiffersFromBase(await this.localSha(), (await this.loadState()).base_sha256);
   }
 
+  /** Время последнего обмена с Диском ('2026-09-30 14:05:00'); пусто — обмена не было. */
+  async lastSyncedAt(): Promise<string> {
+    return (await this.loadState()).synced_at;
+  }
+
   async check(): Promise<SyncCheck> {
     const meta = await this.remoteMeta();
     const state = await this.loadState();

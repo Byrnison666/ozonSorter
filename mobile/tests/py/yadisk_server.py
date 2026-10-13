@@ -2,7 +2,8 @@
 
 Первая строка stdout — JSON {"url", "api_url", "oauth_url", "info_url", "control"}.
 Управление — POST JSON на control: put/get/delete/list файлов «Диска», флаги
-offline/truncate_gets/async_ops/approved/token, fail_next, requests, auth_seen, clear.
+offline/server_error/fail_ops/truncate_gets/async_ops/approved/token, fail_next,
+requests, auth_seen, clear.
 Работает, пока открыт stdin.
 """
 import base64
@@ -35,7 +36,8 @@ def handle(cmd):
     elif op == "list":
         return {"files": sorted(dav.files)}
     elif op == "set":
-        for key in ("offline", "truncate_gets", "async_ops", "approved", "token"):
+        for key in ("offline", "server_error", "fail_ops", "truncate_gets", "async_ops",
+                    "approved", "token"):
             if key in cmd:
                 setattr(dav, key, cmd[key])
     elif op == "fail_next":
@@ -50,6 +52,8 @@ def handle(cmd):
         dav.requests.clear()
         dav.auth_seen.clear()
         dav.fail_next.clear()
+        dav.server_error = None
+        dav.fail_ops = False
         dav.approved = False
     else:
         raise ValueError(op)

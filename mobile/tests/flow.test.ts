@@ -190,15 +190,15 @@ describe('синхронизация с диалогами', () => {
     ui.onRetry = async () => {
       await server.control({ cmd: 'set', offline: false });
     };
-    expect(await syncInteractive(a.sync, host, ui, online)).toBe(true);
+    expect(await syncInteractive(a.sync, host, ui, online)).toBe('IN_SYNC');
     expect(ui.calls).toContain('retry:true:true');
     expect(ui.messages.at(-1)?.[1]).toContain('выложены на Яндекс.Диск');
   });
 
-  test('нет связи: «Позже» — false без сообщений об ошибке', async () => {
+  test('нет связи: «Позже» — Диск недоступен, без сообщений об ошибке', async () => {
     await server.control({ cmd: 'set', offline: true });
     ui.retries = [false];
-    expect(await syncInteractive(a.sync, host, ui, async () => false)).toBe(false);
+    expect(await syncInteractive(a.sync, host, ui, async () => false)).toBe('UNAVAILABLE');
     expect(ui.calls).toContain('retry:false:false');
     expect(ui.messages).toEqual([]);
   });
@@ -206,7 +206,7 @@ describe('синхронизация с диалогами', () => {
   test('отозванный токен — сообщение войти заново', async () => {
     await server.control({ cmd: 'set', token: 'other-token' });
     try {
-      expect(await syncInteractive(a.sync, host, ui, online)).toBe(false);
+      expect(await syncInteractive(a.sync, host, ui, online)).toBe('NOT_SYNCED');
     } finally {
       await server.control({ cmd: 'set', token: 'test-token' });
     }
@@ -226,10 +226,10 @@ describe('синхронизация с диалогами', () => {
   });
 
   test('ручной запуск сообщает об успехе, автоматический — нет', async () => {
-    expect(await syncInteractive(a.sync, host, ui, online, { announce: true })).toBe(true);
+    expect(await syncInteractive(a.sync, host, ui, online, { announce: true })).toBe('IN_SYNC');
     expect(ui.messages.length).toBe(1);
     ui.messages = [];
-    expect(await syncInteractive(a.sync, host, ui, online)).toBe(true);
+    expect(await syncInteractive(a.sync, host, ui, online)).toBe('IN_SYNC');
     expect(ui.messages).toEqual([]);
   });
 
@@ -238,7 +238,70 @@ describe('синхронизация с диалогами', () => {
     a.addClient('222');
     await a.push();
     b.addClient('333');
-    expect(await syncInteractive(b.sync, host, ui, online)).toBe(false);
+    expect(await syncInteractive(b.sync, host, ui, online)).toBe('NOT_SYNCED');
+  });
+
+  test('ручной запуск при сбое Яндекса объясняет, что работать можно', async () => {
+    a.addClient('111');
+    await server.control({ cmd: 'set', server_error: 500 });
+    expect(await syncInteractive(a.sync, host, ui, online, { announce: true })).toBe('UNAVAILABLE');
+    expect(ui.messages).toEqual([['warning', expect.stringContaining('работать можно') as unknown as string]]);
+    expect(ui.calls.filter((c) => c.startsWith('retry'))).toEqual([]);
+  });
+});
+
+describe('Яндекс.Диск недоступен: автоматические попытки молчат', () => {
+  for (const [name, flags] of [
+    ['сбой на стороне Яндекса (500)', { server_error: 500 }],
+    ['слишком много запросов (429)', { server_error: 429 }],
+    ['нет связи', { offline: true }],
+  ] as const) {
+    test(`${name}: без окон, база телефона цела`, async () => {
+      await seed();
+      a.addClient('222');                       // импорт или «Отгрузка» на телефоне
+      await server.control({ cmd: 'set', ...flags });
+      expect(await syncInteractive(a.sync, host, ui, online, { confirmPull: true, quiet: true }))
+        .toBe('UNAVAILABLE');
+      expect(ui.messages).toEqual([]);
+      expect(ui.calls.filter((c) => c.startsWith('retry'))).toEqual([]);
+      expect(host.log.at(-1)).toBe('reload');   // база снова открыта — работа продолжается
+      expect(a.clientIds()).toEqual(['111', '222']);
+      expect(await a.sync.localChanged()).toBe(true);
+    });
+  }
+
+  test('когда Диск заработал, изменения выкладываются', async () => {
+    await seed();
+    a.addClient('222');
+    await server.control({ cmd: 'set', server_error: 503 });
+    expect(await syncInteractive(a.sync, host, ui, online, { quiet: true })).toBe('UNAVAILABLE');
+    await server.control({ cmd: 'set', server_error: null });
+    expect(await syncInteractive(a.sync, host, ui, online, { quiet: true })).toBe('IN_SYNC');
+    await b.pull();
+    expect(b.clientIds()).toEqual(['111', '222']);
+  });
+
+  test('короткий сбой переживает повтор запроса', async () => {
+    a.addClient('111');
+    await server.control({ cmd: 'fail_next', method: 'GET', code: 502 });
+    expect(await syncInteractive(a.sync, host, ui, online, { quiet: true })).toBe('IN_SYNC');
+  });
+
+  test('кончилось место — не временный сбой, окно показывается', async () => {
+    a.addClient('111');
+    await server.control({ cmd: 'fail_next', method: 'GET', code: 507 });
+    expect(await syncInteractive(a.sync, host, ui, online, { quiet: true })).toBe('NOT_SYNCED');
+    expect(ui.messages[0]?.[1]).toContain('закончилось место');
+  });
+
+  test('отозванный вход не прячется', async () => {
+    await server.control({ cmd: 'set', token: 'other-token' });
+    try {
+      expect(await syncInteractive(a.sync, host, ui, online, { quiet: true })).toBe('NOT_SYNCED');
+    } finally {
+      await server.control({ cmd: 'set', token: 'test-token' });
+    }
+    expect(ui.messages[0]?.[1]).toContain('Войдите в Яндекс заново');
   });
 });
 
@@ -246,14 +309,23 @@ describe('запуск и уход в фон', () => {
   test('при запуске: совпадает — ничего; правки с прошлого раза — выложить с сообщением', async () => {
     expect(await startupAction(a.sync)).toEqual({ kind: 'none' });
     a.addClient('111');
-    expect(await startupAction(a.sync)).toEqual({ kind: 'sync', announce: true, assumeOffline: false });
+    expect(await startupAction(a.sync)).toEqual({ kind: 'sync', announce: true });
   });
 
-  test('при запуске без связи: молчим, если выкладывать нечего', async () => {
-    await server.control({ cmd: 'set', offline: true });
-    expect(await startupAction(a.sync)).toEqual({ kind: 'none' });
+  test('при запуске Диск недоступен — без окон, есть правки или нет', async () => {
+    for (const flags of [{ offline: true }, { server_error: 500 }]) {
+      await server.control({ cmd: 'set', offline: false, server_error: null, ...flags });
+      expect(await startupAction(a.sync)).toEqual({ kind: 'unavailable' });
+    }
     a.addClient('111');
-    expect(await startupAction(a.sync)).toEqual({ kind: 'sync', announce: false, assumeOffline: true });
+    expect(await startupAction(a.sync)).toEqual({ kind: 'unavailable' });
+  });
+
+  test('последняя синхронизация запоминается', async () => {
+    expect(await a.sync.lastSyncedAt()).toBe('');
+    a.addClient('111');
+    await a.push();
+    expect(await a.sync.lastSyncedAt()).toMatch(/^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d$/);
   });
 
   test('при запуске с битым meta.json — предупреждение', async () => {
@@ -272,11 +344,13 @@ describe('запуск и уход в фон', () => {
     expect(await backgroundPush(phone('c').sync, host)).toBeNull(); // нечего выкладывать
   });
 
-  test('в фоне сбой сети не роняет приложение', async () => {
+  test('в фоне Диск недоступен — приложение не падает, база снова открыта', async () => {
     a.addClient('111');
-    await server.control({ cmd: 'set', offline: true });
-    expect(await backgroundPush(a.sync, host)).toBeNull();
-    expect(host.log.at(-1)).toBe('reload');
+    for (const flags of [{ offline: true }, { server_error: 500 }]) {
+      await server.control({ cmd: 'set', offline: false, server_error: null, ...flags });
+      expect(await backgroundPush(a.sync, host)).toBe('UNAVAILABLE');
+      expect(host.log.at(-1)).toBe('reload');
+    }
   });
 
   test('повреждённый файл состояния не мешает проверке', async () => {

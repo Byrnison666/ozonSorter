@@ -135,7 +135,8 @@ export class Phone {
     this.dbPath = join(dir, 'ozon_sorter.db');
     this.sync = new SyncService(deps, {
       dbPath: this.dbPath,
-      client: new YaDiskClient('test-token', server.apiUrl, testTransport, 5_000),
+      // Повторы запросов при сбое Диска — без пауз.
+      client: new YaDiskClient('test-token', server.apiUrl, testTransport, 5_000, [0, 0]),
       remoteDir: REMOTE_DIR,
       statePath: join(dir, 'sync_state.json'),
       deviceName: 'Телефон',

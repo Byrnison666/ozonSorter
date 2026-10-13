@@ -27,8 +27,8 @@ import {
 import { colors, radius, type } from '../ui/theme';
 
 /** Жёлтая плашка-предупреждение с переходом к посылкам (alertBanner ПК). */
-function AlertBanner({ icon, title, text, button, onPress }: {
-  icon: IconName; title: string; text: string; button: string; onPress: () => void;
+function AlertBanner({ icon, title, text, button, buttonIcon = 'arrow-right', onPress }: {
+  icon: IconName; title: string; text: string; button: string; buttonIcon?: IconName; onPress: () => void;
 }) {
   return (
     <View style={local.alert}>
@@ -41,7 +41,7 @@ function AlertBanner({ icon, title, text, button, onPress }: {
           <Text style={local.alertText}>{text}</Text>
         </View>
       </View>
-      <Button icon="arrow-right" title={button} onPress={onPress} />
+      <Button icon={buttonIcon} title={button} onPress={onPress} />
     </View>
   );
 }
@@ -66,7 +66,7 @@ export function DashboardScreen() {
   async function onImport() {
     let picked;
     try {
-      picked = await pickXlsx();
+      picked = await app.external(pickXlsx);
     } catch (e) {
       await app.message('Ошибка импорта', `Не удалось открыть файл:\n${(e as Error).message}`);
       return;
@@ -75,6 +75,7 @@ export function DashboardScreen() {
     const { name, bytes } = picked;
     let openDuplicates = false;
     try {
+      await app.dbReady();
       const sha = await sha256(bytes);
       const dup = findDuplicateImport(app.db(), sha);
       if (dup) {
@@ -134,10 +135,11 @@ export function DashboardScreen() {
     if (!latest) return;
     setExporting(point);
     try {
+      await app.dbReady();
       const prepared = prepareExport(app.db(), point, latest.id);
       const fileName = defaultExportFileName(point);
       // Как на ПК: сначала файл, потом отметка посылок в базе.
-      await shareXlsx(prepared.bytes, fileName, `Отгрузка — ${POINT_LABELS[point]}`);
+      await app.external(() => shareXlsx(prepared.bytes, fileName, `Отгрузка — ${POINT_LABELS[point]}`));
       commitExport(app.db(), prepared, fileName);
     } catch (e) {
       await app.message('Ошибка экспорта', `Не удалось сформировать файл:\n${(e as Error).message}`);
@@ -152,6 +154,18 @@ export function DashboardScreen() {
   return (
     <Screen>
       {app.dbError ? <Badge tone="danger" text={`База не открылась: ${app.dbError}`} /> : null}
+      {app.configured && app.diskUnavailable ? (
+        <AlertBanner
+          icon="cloud-off"
+          title="Яндекс.Диск недоступен"
+          text={'Работайте как обычно: база сохранена на телефоне. '
+            + (app.dirty === false ? 'Невыложенных изменений нет.' : 'Изменения выложатся, когда Диск заработает.')
+            + (app.lastSync ? `\nПоследняя синхронизация: ${app.lastSync}` : '')}
+          button="Повторить"
+          buttonIcon="refresh-cw"
+          onPress={() => app.syncNow({ announce: true })}
+        />
+      ) : null}
       {duplicates ? (
         <AlertBanner
           icon="copy"

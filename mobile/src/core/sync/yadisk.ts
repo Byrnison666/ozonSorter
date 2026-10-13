@@ -20,10 +20,20 @@ const MAX_JSON_BYTES = 1024 * 1024;
 const DIRECT_UPLOAD_MAX = 64 * 1024;
 const TEMP_SUFFIX = '.tmp';
 const POLL_DELAYS_MS = [300, 500, 1000, 1000, 2000];
+/** Паузы перед повторами запроса на чтение, на который Диск ответил временным сбоем. */
+export const RETRY_DELAYS_MS: readonly number[] = [1000, 2000];
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
 
 /** (передано байт, всего байт); всего 0 — размер неизвестен. */
 export type Progress = (done: number, total: number) => void;
+
+/**
+ * Сбой на стороне Яндекса, который проходит сам: 5xx и «слишком много
+ * запросов». 507 (кончилось место) сам не пройдёт.
+ */
+function isTransient(status: number): boolean {
+  return status === 429 || (status >= 500 && status < 600 && status !== 507);
+}
 
 export class YaDiskError extends Error {
   constructor(
@@ -43,6 +53,14 @@ export class YaDiskError extends Error {
   /** Нет связи. Ошибку сертификата повтор «когда появится интернет» не лечит. */
   get isNetworkError(): boolean {
     return this.status === null && !this.isTlsError;
+  }
+
+  /**
+   * Диск временно недоступен: нет связи или сбой на стороне Яндекса. Пройдёт
+   * само — с базой можно работать локально и выложить её позже.
+   */
+  get isUnavailable(): boolean {
+    return this.isNetworkError || (this.status !== null && isTransient(this.status));
   }
 }
 
@@ -132,6 +150,7 @@ export class YaDiskClient {
     apiUrl: string,
     private readonly transport: Transport,
     readonly timeoutMs = 30_000,
+    private readonly retryDelaysMs: readonly number[] = RETRY_DELAYS_MS,
   ) {
     // Токен уходит в каждом запросе — без TLS его видно в сети.
     if (!isSecureUrl(apiUrl)) throw new Error('Disk API URL must use https');
@@ -152,10 +171,21 @@ export class YaDiskClient {
     if (splitUrl(target).origin !== splitUrl(this.apiUrl).origin) {
       throw new YaDiskError(`${method} ${endpoint}: unexpected API host`);
     }
-    const response = await httpRequest(this.transport, {
+    const send = () => httpRequest(this.transport, {
       method, url: target, timeoutMs: this.timeoutMs, maxBytes: MAX_JSON_BYTES,
       headers: { Authorization: `OAuth ${this.token}`, Accept: 'application/json' },
     });
+    let response = await send();
+    // Повторяем только чтение: запись сервер мог успеть выполнить, и повтор
+    // дал бы ложную ошибку. Несостоявшуюся выгрузку повторит следующая
+    // синхронизация — meta.json пишется последним.
+    if (method === 'GET') {
+      for (const delay of this.retryDelaysMs) {
+        if (!isTransient(response.status)) break;
+        await sleep(delay);
+        response = await send();
+      }
+    }
     return { status: response.status, json: response.json() };
   }
 

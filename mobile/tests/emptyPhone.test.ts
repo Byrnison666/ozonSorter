@@ -95,7 +95,7 @@ describe.each(variants)('пустой телефон: %s', (_name, prepare) => {
     prepare(phone);
     const before = await diskMeta();
     const { impl, asked } = ui({ pull: true });
-    expect(await syncInteractive(phone.sync, host, impl, online, { announce: true })).toBe(true);
+    expect(await syncInteractive(phone.sync, host, impl, online, { announce: true })).toBe('IN_SYNC');
     // Ни конфликта, ни вопроса «выложить»; «загрузить?» допустимо (Диск «старше» состояния).
     expect(asked.filter((q) => q !== 'pull')).toEqual([]);
     expect(await diskMeta()).toBe(before);
@@ -107,9 +107,9 @@ describe.each(variants)('пустой телефон: %s', (_name, prepare) => {
     prepare(phone);
     const before = await diskMeta();
     const action = await startupAction(phone.sync);
-    expect(action).toEqual({ kind: 'sync', announce: false, assumeOffline: false });
+    expect(action).toEqual({ kind: 'sync', announce: false });
     const { impl, asked } = ui({ pull: false });
-    expect(await syncInteractive(phone.sync, host, impl, online, { confirmPull: true })).toBe(false);
+    expect(await syncInteractive(phone.sync, host, impl, online, { confirmPull: true })).toBe('NOT_SYNCED');
     expect(asked).toEqual(['pull']);
     expect(await diskMeta()).toBe(before);
     expect(pc.run<string[]>('client_ids')).toEqual(['111', '222', '333']);
@@ -142,7 +142,7 @@ describe('телефон отказался загружать базу и на�
     expect(await phone.status()).toBe('CONFLICT');
     expect(await backgroundPush(phone.sync, host)).toBeNull();
     const { impl, asked } = ui({ conflict: '' });
-    expect(await syncInteractive(phone.sync, host, impl, online, { confirmPull: true })).toBe(false);
+    expect(await syncInteractive(phone.sync, host, impl, online, { confirmPull: true })).toBe('NOT_SYNCED');
     expect(asked).toEqual(['conflict']);
     expect(await diskMeta()).toBe(before);
   });
@@ -158,7 +158,7 @@ describe('телефон отказался загружать базу и на�
     impl.showMessage = async (_k, _t, text) => {
       shown.push(text);
     };
-    expect(await syncInteractive(phone.sync, host, impl, online)).toBe(false);
+    expect(await syncInteractive(phone.sync, host, impl, online)).toBe('NOT_SYNCED');
     expect(shown[0]).toContain('ни разу не загружало');
     expect(await diskMeta()).toBe(before);
     expect(pc.run<string[]>('client_ids')).toEqual(['111', '222', '333']);

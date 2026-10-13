@@ -155,10 +155,12 @@ export function SettingsScreen() {
       </Card>
       {app.configured ? (
         <Badge
-          tone={app.dirty === false ? 'success' : 'warning'}
+          tone={app.dirty === false && !app.diskUnavailable ? 'success' : 'warning'}
           dot
-          text={app.dirty === null ? 'Яндекс.Диск: не удалось проверить изменения'
-            : app.dirty ? 'Яндекс.Диск: есть невыложенные изменения' : 'Яндекс.Диск: невыложенных изменений нет'}
+          text={app.diskUnavailable
+            ? 'Яндекс.Диск недоступен — работайте как обычно, изменения выложатся, когда он заработает'
+            : app.dirty === null ? 'Яндекс.Диск: не удалось проверить изменения'
+              : app.dirty ? 'Яндекс.Диск: есть невыложенные изменения' : 'Яндекс.Диск: невыложенных изменений нет'}
         />
       ) : null}
       <Text style={ui.mutedSmall}>

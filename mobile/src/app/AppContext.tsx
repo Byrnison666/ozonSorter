@@ -2,7 +2,8 @@
  * Состояние приложения: открытая база, настройки Диска, синхронизация.
  * Повторяет роль MainWindow ПК: release/reload базы вокруг обмена, обмен после
  * каждой правки, проверка при запуске; вместо «при закрытии» — тихая выгрузка
- * при уходе в фон.
+ * при уходе в фон. Когда Диск недоступен, работа идёт с базой телефона:
+ * автоматические попытки молчат и на время замолкают, на «Главной» — плашка.
  */
 import {
   createContext, type ReactNode, useCallback, useContext, useEffect, useMemo, useRef, useState,
@@ -13,8 +14,8 @@ import type { Db } from '../core/db';
 import { configureConnection, ensureSchema } from '../core/schema';
 import { defaultConfig, isConfigured, needsRefresh, type SyncConfig, targetId } from '../core/sync/config';
 import {
-  backgroundPush, type DbHost, hasLocalChanges, type InteractiveOptions, SLOW_SPEED, SpeedMeter,
-  startupAction, syncInteractive, type SyncUi, texts, transferText, VPN_HINT,
+  backgroundPush, type DbHost, formatTime, hasLocalChanges, type InteractiveOptions, SLOW_SPEED, SpeedMeter,
+  startupAction, type SyncAttempt, syncInteractive, type SyncUi, texts, transferText, VPN_HINT,
 } from '../core/sync/flow';
 import { CancelToken, SyncCancelled, SyncError, SyncService } from '../core/sync/syncService';
 import { type Progress, YaDiskClient } from '../core/sync/yadisk';
@@ -31,6 +32,8 @@ const TRANSFER_TIMEOUT_MS = 300_000;
 const SLOW_HINT_MS = 10_000;
 // Чаще не перерисовываем индикатор передачи.
 const PROGRESS_INTERVAL_MS = 100;
+// После неудачи автоматически не пробуем: каждая попытка — ожидание и разряд батареи.
+const AUTO_SYNC_PAUSE_MS = 10 * 60_000;
 
 export type Dirty = boolean | null;
 
@@ -45,9 +48,20 @@ interface AppApi {
   configured: boolean;
   dirty: Dirty;
   syncBusy: boolean;
+  /** Последняя попытка обмена не достучалась до Диска. */
+  diskUnavailable: boolean;
+  /** Время последней синхронизации ('30.09.2026 14:05'); пусто — не было. */
+  lastSync: string;
   syncNow(opts?: InteractiveOptions): Promise<boolean>;
-  /** Экран изменил базу: перечитать и сразу выложить на Диск. */
+  /** Экран изменил базу: перечитать и выложить на Диск (если Диск не на паузе после сбоя). */
   onDataChanged(): void;
+  /**
+   * Внешнее окно (выбор файла, «Поделиться»): Android уводит приложение в фон,
+   * но выгрузку при этом не начинаем — база нужна сразу после возврата.
+   */
+  external<T>(fn: () => Promise<T>): Promise<T>;
+  /** Дождаться конца фоновой выгрузки, если она идёт: база на это время закрыта. */
+  dbReady(): Promise<void>;
   /** Долгая локальная операция под индикатором (без отмены). */
   runBusy<T>(text: string, fn: () => T | Promise<T>): Promise<T>;
   ask: typeof ask;
@@ -115,6 +129,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [dirty, setDirty] = useState<Dirty>(null);
   const [syncBusy, setSyncBusy] = useState(false);
   const busyRef = useRef(false);
+  const [diskUnavailable, setDiskUnavailable] = useState(false);
+  const [lastSync, setLastSync] = useState('');
+  // До этого момента (Date.now) автоматических попыток нет.
+  const autoSyncAfter = useRef(0);
+  const externalOpen = useRef(0);
+  const backgroundRun = useRef<Promise<void> | null>(null);
   const [progress, setProgress] = useState<Busy | null>(null);
   // Отменённые операции ещё ждут сеть; новые не начинаем, пока они не закончатся.
   const abandoned = useRef(new Set<Promise<unknown>>());
@@ -167,11 +187,19 @@ export function AppProvider({ children }: { children: ReactNode }) {
     const c = configRef.current;
     if (!isConfigured(c)) return setDirty(null);
     try {
-      setDirty(await hasLocalChanges(await makeService(c)));
+      const service = await makeService(c);
+      setDirty(await hasLocalChanges(service));
+      const at = await service.lastSyncedAt();
+      setLastSync(at ? formatTime(at) : '');
     } catch {
       setDirty(null);
     }
   }, [makeService]);
+
+  const noteDiskState = useCallback((unavailable: boolean) => {
+    setDiskUnavailable(unavailable);
+    autoSyncAfter.current = unavailable ? Date.now() + AUTO_SYNC_PAUSE_MS : 0;
+  }, []);
 
   /**
    * Токен действует год; за месяц до конца обновляем. Сбой не мешает
@@ -301,20 +329,41 @@ export function AppProvider({ children }: { children: ReactNode }) {
     if (!isConfigured(c) || busyRef.current) return false;
     busyRef.current = true;
     setSyncBusy(true);
+    let attempt: SyncAttempt = 'NOT_SYNCED';
     try {
       const service = await makeService(await freshConfig(c));
-      return await syncInteractive(service, host, ui, probeInternet, opts);
+      attempt = await syncInteractive(service, host, ui, probeInternet, opts);
+      return attempt === 'IN_SYNC';
     } finally {
       busyRef.current = false;
       setSyncBusy(false);
+      noteDiskState(attempt === 'UNAVAILABLE');
       void refreshDirty();
     }
-  }, [freshConfig, host, makeService, refreshDirty, ui]);
+  }, [freshConfig, host, makeService, noteDiskState, refreshDirty, ui]);
 
   const onDataChanged = useCallback(() => {
     setVersion((v) => v + 1);
-    void syncNow({ confirmPull: true });
-  }, [syncNow]);
+    if (Date.now() < autoSyncAfter.current) {
+      void refreshDirty();
+      return;
+    }
+    void syncNow({ confirmPull: true, quiet: true });
+  }, [refreshDirty, syncNow]);
+
+  const external = useCallback(async <T,>(fn: () => Promise<T>): Promise<T> => {
+    externalOpen.current += 1;
+    try {
+      return await fn();
+    } finally {
+      externalOpen.current -= 1;
+    }
+  }, []);
+
+  const dbReady = useCallback(async () => {
+    const run = backgroundRun.current;
+    if (run) await runBusy('Завершается обмен с Яндекс.Диском…', () => run);
+  }, [runBusy]);
 
   const saveSettings = useCallback(async (c: SyncConfig) => {
     await saveConfig(c);
@@ -344,37 +393,40 @@ export function AppProvider({ children }: { children: ReactNode }) {
       const action = await startupAction(await makeService(await freshConfig(c)));
       if (!alive) return;
       if (action.kind === 'warn') await messageBox('Синхронизация', action.text);
-      else if (action.kind === 'sync') {
-        await syncNow({ confirmPull: true, announce: action.announce, assumeOffline: action.assumeOffline });
-      }
+      else if (action.kind === 'unavailable') noteDiskState(true);
+      else if (action.kind === 'sync') await syncNow({ confirmPull: true, announce: action.announce, quiet: true });
     })();
     return () => {
       alive = false;
     };
-  }, [freshConfig, host, makeService, refreshDirty, syncNow]);
+  }, [freshConfig, host, makeService, noteDiskState, refreshDirty, syncNow]);
 
   // Уход в фон вместо «закрытия программы»: тихо выложить, если можно.
   useEffect(() => {
     const sub = AppState.addEventListener('change', (state) => {
-      if (state !== 'background' || busyRef.current) return;
+      if (state !== 'background' || busyRef.current || externalOpen.current) return;
+      if (Date.now() < autoSyncAfter.current) return;
       const c = configRef.current;
       if (!isConfigured(c)) return;
       busyRef.current = true;
-      (async () => {
+      backgroundRun.current = (async () => {
         try {
-          await backgroundPush(await makeService(c), host);
+          const pushed = await backgroundPush(await makeService(c), host);
+          if (pushed === 'UNAVAILABLE') noteDiskState(true);
+          else if (pushed !== null) noteDiskState(false);
         } finally {
           busyRef.current = false;
+          backgroundRun.current = null;
           void refreshDirty();
         }
       })();
     });
     return () => sub.remove();
-  }, [host, makeService, refreshDirty]);
+  }, [host, makeService, noteDiskState, refreshDirty]);
 
   const api: AppApi = {
     db, dbError, version, config, saveSettings, configured: isConfigured(config), dirty, syncBusy,
-    syncNow, onDataChanged, runBusy, ask, message: messageBox,
+    diskUnavailable, lastSync, syncNow, onDataChanged, external, dbReady, runBusy, ask, message: messageBox,
   };
 
   return (

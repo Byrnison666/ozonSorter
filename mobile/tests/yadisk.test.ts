@@ -5,8 +5,8 @@
 import { describe, expect, test } from 'bun:test';
 
 import {
-  type HttpRequest, type HttpResponse, httpRequest, isSecureUrl, type Transport, xhrTransport, YaDiskClient,
-  YaDiskError,
+  type HttpRequest, type HttpResponse, httpRequest, isSecureUrl, RETRY_DELAYS_MS, type Transport, xhrTransport,
+  YaDiskClient, YaDiskError,
 } from '../src/core/sync/yadisk';
 
 type XhrEvent = { loaded: number; total: number; lengthComputable: boolean };
@@ -225,7 +225,9 @@ describe('клиент Диска', () => {
       [`GET ${API}/operations/8`]: () => ({ json: { status: 'failed' } }),
     });
     const client = new YaDiskClient('t', API, transport);
-    await expect(client.put('x.db.gz', new Uint8Array(100_000))).rejects.toThrow('failed');
+    const err = await client.put('x.db.gz', new Uint8Array(100_000)).catch((e) => e);
+    expect(err.message).toContain('failed');
+    expect(err.isUnavailable).toBe(true); // сбой на стороне Диска — пройдёт сам
   });
 
   test('большой файл — под временным именем, затем перенос с заменой', async () => {
@@ -261,6 +263,49 @@ describe('клиент Диска', () => {
     expect(await client.listDir('x')).toEqual([]);
     missing = false;
     expect(await client.listDir('x')).toEqual(['a', 'b']);
+  });
+
+  test('временная недоступность: нет связи, 5xx кроме 507, 429', () => {
+    for (const status of [500, 502, 503, 504, 429]) {
+      expect(new YaDiskError('x', status).isUnavailable).toBe(true);
+      expect(new YaDiskError('x', status).isNetworkError).toBe(false);
+    }
+    expect(new YaDiskError('x').isUnavailable).toBe(true);
+    for (const status of [0, 400, 401, 403, 404, 409, 507]) {
+      expect(new YaDiskError('x', status).isUnavailable).toBe(false);
+    }
+    expect(new YaDiskError('x', null, true).isUnavailable).toBe(false); // TLS сам не пройдёт
+  });
+
+  test('чтение повторяется после временного сбоя, не больше двух раз', async () => {
+    let failures = 1;
+    const { transport, log } = routes({
+      [`GET ${API}/resources`]: () => (failures-- > 0
+        ? { status: 503, json: { error: 'ServiceUnavailable' } }
+        : { json: { _embedded: { items: [{ name: 'a' }] } } }),
+    });
+    const client = new YaDiskClient('t', API, transport, 1000, [0, 0]);
+    expect(await client.listDir('x')).toEqual(['a']);
+    expect(log.length).toBe(2);
+    failures = 10;
+    log.length = 0;
+    const err = await client.listDir('x').catch((e) => e);
+    expect(err.isUnavailable).toBe(true);
+    expect(log.length).toBe(3);
+    expect(RETRY_DELAYS_MS).toEqual([1000, 2000]);
+  });
+
+  test('запись и долгие ошибки не повторяются', async () => {
+    const { transport, log } = routes({
+      [`PUT ${API}/resources`]: () => ({ status: 500, json: {} }),
+      [`DELETE ${API}/resources`]: () => ({ status: 503, json: {} }),
+      [`GET ${API}/resources`]: () => ({ status: 507, json: {} }),
+    });
+    const client = new YaDiskClient('t', API, transport, 1000, [0, 0]);
+    expect((await client.ensureDir('a').catch((e) => e)).isUnavailable).toBe(true);
+    expect((await client.delete('a').catch((e) => e)).isUnavailable).toBe(true);
+    expect((await client.listDir('a').catch((e) => e)).isUnavailable).toBe(false);
+    expect(log.map((r) => r.method)).toEqual(['PUT', 'DELETE', 'GET']);
   });
 
   test('удаление: отсутствующий файл — не ошибка', async () => {

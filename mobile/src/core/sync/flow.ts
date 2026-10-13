@@ -55,6 +55,10 @@ export function describeError(error: unknown): string {
     }
     if (error.isNetworkError) return `Нет связи с Яндекс.Диском. Проверьте интернет и повторите.\n${VPN_HINT}`;
     if (error.status === 507) return 'На Яндекс.Диске закончилось место.';
+    if (error.isUnavailable) {
+      return `Яндекс.Диск сейчас не работает (сбой на стороне Яндекса, код ${error.status}).\n` +
+        'База сохранена на этом телефоне, работать можно — изменения выложатся, когда Диск заработает.';
+    }
     return `Яндекс.Диск ответил ошибкой ${error.status}. Повторите позже.`;
   }
   if (error instanceof SyncError) return error.message;
@@ -220,18 +224,29 @@ export interface InteractiveOptions {
   /** Сообщать об успехе и без сбоев (ручной запуск). */
   announce?: boolean;
   confirmPull?: boolean;
-  /** Отсутствие связи уже установлено: сразу предложить повторить. */
-  assumeOffline?: boolean;
+  /**
+   * Недоступность Диска без окон (автоматические попытки): база остаётся на
+   * телефоне, изменения выложит следующая удачная синхронизация.
+   */
+  quiet?: boolean;
 }
 
 /**
- * Синхронизация со всеми диалогами; true — база совпадает с Диском. Без
- * интернета предлагает повторить; после повтора об успехе сообщается всегда.
+ * Итог синхронизации со всеми диалогами: IN_SYNC — база совпадает с Диском;
+ * NOT_SYNCED — отказ, отмена или ошибка (показана); UNAVAILABLE — Диск
+ * временно недоступен, работаем с базой телефона.
+ */
+export type SyncAttempt = 'IN_SYNC' | 'NOT_SYNCED' | 'UNAVAILABLE';
+
+/**
+ * Синхронизация со всеми диалогами. Без интернета предлагает повторить; после
+ * повтора об успехе сообщается всегда. При сбое на стороне Яндекса объясняет,
+ * что работать можно.
  */
 export async function syncInteractive(
   service: SyncService, host: DbHost, ui: SyncUi, probeInternet: () => Promise<boolean>,
-  { announce = false, confirmPull = false, assumeOffline = false }: InteractiveOptions = {},
-): Promise<boolean> {
+  { announce = false, confirmPull = false, quiet = false }: InteractiveOptions = {},
+): Promise<SyncAttempt> {
   const probe = async () => {
     try {
       return await ui.withProgress('Проверка связи…', () => probeInternet());
@@ -240,61 +255,60 @@ export async function syncInteractive(
     }
   };
   let wasOffline = false;
-  if (assumeOffline) {
-    if (!(await ui.askRetryOffline((await hasLocalChanges(service)) === true, await probe()))) return false;
-    wasOffline = true;
-  }
   for (;;) {
     let result: SyncResult;
     try {
       result = await synchronize(service, host, ui, confirmPull);
     } catch (e) {
-      if (e instanceof SyncCancelled) return false;
+      if (e instanceof SyncCancelled) return 'NOT_SYNCED';
+      if (e instanceof YaDiskError && e.isUnavailable && quiet) return 'UNAVAILABLE';
       if (e instanceof YaDiskError && e.isNetworkError) {
         if (await ui.askRetryOffline((await hasLocalChanges(service)) === true, await probe())) {
           wasOffline = true;
           continue;
         }
-        return false;
+        return 'UNAVAILABLE';
+      }
+      if (e instanceof YaDiskError && e.isUnavailable) {
+        await ui.showMessage('warning', 'Яндекс.Диск недоступен', describeError(e));
+        return 'UNAVAILABLE';
       }
       await ui.showMessage('error', 'Ошибка синхронизации', describeError(e));
-      return false;
+      return 'NOT_SYNCED';
     }
     if (inSync(result) && (announce || wasOffline)) await ui.showMessage('info', 'Синхронизация', result.text);
-    return inSync(result);
+    return inSync(result) ? 'IN_SYNC' : 'NOT_SYNCED';
   }
 }
 
 /** Что сделать после фоновой проверки при запуске (_handle_startup_result ПК). */
 export type StartupAction =
   | { kind: 'none' }
+  | { kind: 'unavailable' }
   | { kind: 'warn'; text: string }
-  | { kind: 'sync'; announce: boolean; assumeOffline: boolean };
+  | { kind: 'sync'; announce: boolean };
 
 export async function startupAction(service: SyncService): Promise<StartupAction> {
   let check: SyncCheck;
   try {
     check = await service.check();
   } catch (e) {
-    if (e instanceof YaDiskError && e.isNetworkError) {
-      // Без интернета молчим, пока выкладывать нечего.
-      return (await hasLocalChanges(service)) === true
-        ? { kind: 'sync', announce: false, assumeOffline: true }
-        : { kind: 'none' };
-    }
+    // Работаем с базой телефона без окон; изменения выложит следующая удачная синхронизация.
+    if (e instanceof YaDiskError && e.isUnavailable) return { kind: 'unavailable' };
     return { kind: 'warn', text: describeError(e) };
   }
   if (check.status === SyncStatus.UP_TO_DATE) return { kind: 'none' };
   // Невыложенные с прошлого раза изменения: об успехе сообщаем.
-  return { kind: 'sync', announce: check.status === SyncStatus.LOCAL_AHEAD, assumeOffline: false };
+  return { kind: 'sync', announce: check.status === SyncStatus.LOCAL_AHEAD };
 }
 
 /**
  * Приложение уходит в фон: окна показать нельзя, поэтому только тихая выгрузка,
  * когда Диск не менялся (LOCAL_AHEAD). Конфликт и загрузку решит пользователь,
- * когда вернётся. Возвращает номер выложенной ревизии или null.
+ * когда вернётся. Возвращает номер выложенной ревизии; 'UNAVAILABLE' — Диск
+ * недоступен; null — выкладывать нечего или нельзя без вопросов.
  */
-export async function backgroundPush(service: SyncService, host: DbHost): Promise<number | null> {
+export async function backgroundPush(service: SyncService, host: DbHost): Promise<number | 'UNAVAILABLE' | null> {
   try {
     if ((await hasLocalChanges(service)) !== true) return null;
     host.release();
@@ -307,7 +321,7 @@ export async function backgroundPush(service: SyncService, host: DbHost): Promis
     }
   } catch (e) {
     console.warn('Background push failed', e);
-    return null;
+    return e instanceof YaDiskError && e.isUnavailable ? 'UNAVAILABLE' : null;
   }
 }
 

@@ -27,21 +27,23 @@ const theme: Theme = {
   },
 };
 
-/** Кнопка синхронизации в шапке: цвет — есть ли невыложенные изменения. */
+/** Кнопка синхронизации в шапке: цвет — есть ли невыложенные изменения, доступен ли Диск. */
 function SyncButton() {
   const app = useApp();
   if (!app.configured) return null;
-  const clean = app.dirty === false;
+  const clean = app.dirty === false && !app.diskUnavailable;
+  const icon = app.diskUnavailable ? 'cloud-off' : clean ? 'cloud' : 'upload-cloud';
   return (
     <Pressable
       accessibilityRole="button"
-      accessibilityLabel={app.dirty ? 'Синхронизировать: есть невыложенные изменения' : 'Синхронизировать'}
+      accessibilityLabel={app.diskUnavailable ? 'Синхронизировать: Яндекс.Диск недоступен'
+        : app.dirty ? 'Синхронизировать: есть невыложенные изменения' : 'Синхронизировать'}
       onPress={() => app.syncNow({ announce: true })}
       disabled={app.syncBusy}
       hitSlop={8}
       style={({ pressed }) => [s.bubble, !clean && s.bubbleDirty, pressed && s.bubblePressed]}
     >
-      <Icon name={clean ? 'cloud' : 'upload-cloud'} size={20} color={clean ? colors.success : colors.warningText} />
+      <Icon name={icon} size={20} color={clean ? colors.success : colors.warningText} />
     </Pressable>
   );
 }
