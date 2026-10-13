@@ -37,6 +37,14 @@ _MAX_REDIRECTS = 5
 _DIRECT_UPLOAD_MAX = 64 * 1024
 _TEMP_SUFFIX = ".tmp"
 _POLL_DELAYS = (0.3, 0.5, 1.0, 1.0, 2.0)
+# Паузы перед повторами запроса на чтение, на который Диск ответил временным сбоем.
+_RETRY_DELAYS = (1.0, 2.0)
+
+
+def _is_transient(status: int) -> bool:
+    """Сбой на стороне Яндекса, который проходит сам: 5xx и «слишком много
+    запросов». 507 (кончилось место) сам не пройдёт."""
+    return status == 429 or (500 <= status < 600 and status != 507)
 
 
 class YaDiskError(Exception):
@@ -57,6 +65,12 @@ class YaDiskError(Exception):
         """Нет связи (интернет выключен, сервер недоступен). Ошибка проверки
         сертификата сюда не входит: повтор «когда появится интернет» её не лечит."""
         return self.status is None and not self.is_tls_error
+
+    @property
+    def is_unavailable(self) -> bool:
+        """Диск временно недоступен: нет связи или сбой на стороне Яндекса.
+        Пройдёт само — с базой можно работать локально и выложить её позже."""
+        return self.is_network_error or (self.status is not None and _is_transient(self.status))
 
 
 def is_secure_url(url: str) -> bool:
@@ -202,7 +216,17 @@ class YaDiskClient:
             raise YaDiskError(f"{method} {endpoint}: unexpected API host")
         headers = {"Authorization": f"OAuth {self.token}", "Accept": "application/json"}
         body = b"" if method in ("PUT", "POST") else None
-        return http_request(method, url, headers, body, self.timeout, _MAX_JSON_BYTES)
+        response = http_request(method, url, headers, body, self.timeout, _MAX_JSON_BYTES)
+        # Повторяем только чтение: запись сервер мог успеть выполнить, и повтор
+        # дал бы ложную ошибку. Несостоявшуюся выгрузку повторит следующая
+        # синхронизация — meta.json пишется последним.
+        if method == "GET":
+            for delay in _RETRY_DELAYS:
+                if not _is_transient(response.status):
+                    break
+                time.sleep(delay)
+                response = http_request(method, url, headers, body, self.timeout, _MAX_JSON_BYTES)
+        return response
 
     @staticmethod
     def _fail(method: str, what: str, response: Response) -> YaDiskError:

@@ -146,6 +146,82 @@ class YaDiskClientTest(unittest.TestCase):
         finally:
             self.server = FakeYaDiskServer()  # чтобы tearDown было что останавливать
 
+    # --- временная недоступность Диска ---
+
+    def test_server_errors_and_throttling_mean_disk_unavailable(self):
+        # Сбой на стороне Яндекса проходит сам — базой можно работать локально.
+        for status in (500, 502, 503, 504, 429):
+            with self.subTest(status=status):
+                self.server.server_error = status
+                with mock.patch.object(yadisk_api.time, "sleep"):
+                    with self.assertRaises(YaDiskError) as ctx:
+                        self.client.list_dir("OzonSorter")
+                self.assertEqual(ctx.exception.status, status)
+                self.assertTrue(ctx.exception.is_unavailable)
+                self.assertFalse(ctx.exception.is_network_error)
+
+    def test_no_connection_means_disk_unavailable(self):
+        self.server.offline = True
+        with self.assertRaises(YaDiskError) as ctx:
+            self.client.list_dir("OzonSorter")
+        self.assertTrue(ctx.exception.is_unavailable)
+
+    def test_failed_disk_operation_means_disk_unavailable(self):
+        self.client.ensure_dir("OzonSorter")
+        self.client.put("OzonSorter/base.db.gz", b"a" * BIG)
+        self.server.fail_ops = True
+        with mock.patch.object(yadisk_api.time, "sleep"):
+            with self.assertRaises(YaDiskError) as ctx:
+                self.client.put("OzonSorter/base.db.gz", b"b" * BIG)
+        self.assertTrue(ctx.exception.is_unavailable)
+        self.assertEqual(self.server.files["/OzonSorter/base.db.gz"], b"a" * BIG)
+
+    def test_lasting_problems_are_not_unavailability_and_not_retried(self):
+        # Нет места, отозванный вход, неверный запрос сами не пройдут: их
+        # показывают оператору, а не откладывают.
+        for status in (507, 401, 403, 400, 409):
+            with self.subTest(status=status):
+                self.server.server_error = status
+                self.server.requests.clear()
+                with mock.patch.object(yadisk_api.time, "sleep") as sleep:
+                    with self.assertRaises(YaDiskError) as ctx:
+                        self.client.list_dir("OzonSorter")
+                self.assertFalse(ctx.exception.is_unavailable)
+                sleep.assert_not_called()
+                self.assertEqual(len(self._paths("GET")), 1)
+        tls = YaDiskError("TLS error", tls=True)
+        self.assertFalse(tls.is_unavailable)
+
+    def test_read_request_is_retried_after_server_error(self):
+        self.client.ensure_dir("OzonSorter")
+        self.client.put("OzonSorter/a.bin", b"1")
+        self.server.fail_next["GET"] = 503
+        with mock.patch.object(yadisk_api.time, "sleep") as sleep:
+            self.assertEqual(self.client.get("OzonSorter/a.bin"), b"1")
+        sleep.assert_called_once_with(1.0)
+
+    def test_read_request_gives_up_after_two_retries(self):
+        self.server.server_error = 500
+        with mock.patch.object(yadisk_api.time, "sleep") as sleep:
+            with self.assertRaises(YaDiskError) as ctx:
+                self.client.list_dir("OzonSorter")
+        self.assertEqual(ctx.exception.status, 500)
+        self.assertEqual([c.args[0] for c in sleep.call_args_list], [1.0, 2.0])
+        self.assertEqual(len(self._paths("GET")), 3)
+
+    def test_write_request_is_not_retried(self):
+        # Сервер мог успеть выполнить запись — повтор дал бы ложную ошибку.
+        # Выгрузку безопасно отложить: meta.json пишется последним.
+        self.server.server_error = 500
+        with mock.patch.object(yadisk_api.time, "sleep") as sleep:
+            with self.assertRaises(YaDiskError):
+                self.client.ensure_dir("OzonSorter")
+            with self.assertRaises(YaDiskError):
+                self.client.delete("OzonSorter/a.bin")
+        sleep.assert_not_called()
+        self.assertEqual(len(self._paths("PUT")), 1)
+        self.assertEqual(len(self._paths("DELETE")), 1)
+
     # --- адреса и токен ---
 
     def test_plain_http_to_remote_host_rejected(self):

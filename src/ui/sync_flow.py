@@ -1,7 +1,7 @@
 """Сценарий синхронизации для интерфейса: проверка, выгрузка, скачивание,
-выбор версии при конфликте, повтор при отсутствии интернета. Сеть работает в
-фоновом потоке; на время обмена окно закрыто модальным индикатором — базу в
-это время трогать нельзя.
+выбор версии при конфликте, повтор при отсутствии интернета, работа без Диска,
+когда он недоступен. Сеть работает в фоновом потоке; на время обмена окно
+закрыто модальным индикатором — базу в это время трогать нельзя.
 """
 import socket
 import time
@@ -54,6 +54,13 @@ class SyncOutcome(str, Enum):
     PUSHED = "PUSHED"
     PULLED = "PULLED"
     DECLINED = "DECLINED"    # пользователь отказался (конфликт, загрузка с Диска)
+
+
+class SyncAttempt(str, Enum):
+    """Итог синхронизации со всеми диалогами."""
+    IN_SYNC = "IN_SYNC"            # база совпадает с Диском
+    NOT_SYNCED = "NOT_SYNCED"      # отказ, отмена или ошибка (оператору показана)
+    UNAVAILABLE = "UNAVAILABLE"    # Диск временно недоступен, работаем с локальной базой
 
 
 @dataclass(frozen=True)
@@ -109,6 +116,10 @@ def describe_error(error: Exception) -> str:
             return f"Нет связи с Яндекс.Диском. Проверьте интернет и повторите.\n{VPN_HINT}"
         if error.status == 507:
             return "На Яндекс.Диске закончилось место."
+        if error.is_unavailable:
+            return (f"Яндекс.Диск сейчас не работает (сбой на стороне Яндекса, код {error.status}).\n"
+                    "База сохранена на этом компьютере, работать можно — изменения "
+                    "выложатся, когда Диск заработает.")
         return f"Яндекс.Диск ответил ошибкой {error.status}. Повторите позже."
     if isinstance(error, SyncError):
         return str(error)
@@ -527,42 +538,44 @@ def synchronize(main_window, config: SyncConfig, confirm_pull: bool = False) -> 
 
 
 def sync_interactive(main_window, config: SyncConfig, announce: bool = False,
-                     confirm_pull: bool = False, assume_offline: bool = False) -> bool:
-    """Синхронизация со всеми диалогами. True — база совпадает с Диском.
+                     confirm_pull: bool = False, quiet: bool = False) -> SyncAttempt:
+    """Синхронизация со всеми диалогами.
 
     Без интернета предлагает включить его и повторить; после такого повтора об
-    успехе сообщается всегда. announce — сообщать об успехе и без сбоев (ручной
-    запуск). assume_offline — отсутствие связи уже установлено (фоновой
-    проверкой): сразу начать с предложения включить интернет.
+    успехе сообщается всегда. При сбое на стороне Яндекса объясняет, что работать
+    можно. announce — сообщать об успехе и без сбоев (ручной запуск). quiet —
+    недоступность Диска без окон (автоматические попытки): база остаётся
+    локальной, изменения выложит следующая удачная синхронизация.
     """
     was_offline = False
-    if assume_offline:
-        if not _ask_retry_offline(main_window, has_local_changes(main_window, config) is True,
-                                  _probe_internet(main_window)):
-            return False
-        was_offline = True
     while True:
         try:
             result = synchronize(main_window, config, confirm_pull=confirm_pull)
         except SyncCancelled:
-            return False
+            return SyncAttempt.NOT_SYNCED
         except YaDiskError as e:
+            if e.is_unavailable and quiet:
+                return SyncAttempt.UNAVAILABLE
             if e.is_network_error:
                 if _ask_retry_offline(main_window, has_local_changes(main_window, config) is True,
                                       _probe_internet(main_window)):
                     was_offline = True
                     continue
-                return False
+                return SyncAttempt.UNAVAILABLE
+            if e.is_unavailable:
+                show_message(main_window, QMessageBox.Warning, "Яндекс.Диск недоступен",
+                             describe_error(e))
+                return SyncAttempt.UNAVAILABLE
             show_message(main_window, QMessageBox.Critical, "Ошибка синхронизации",
                          describe_error(e))
-            return False
+            return SyncAttempt.NOT_SYNCED
         except Exception as e:
             show_message(main_window, QMessageBox.Critical, "Ошибка синхронизации",
                          describe_error(e))
-            return False
+            return SyncAttempt.NOT_SYNCED
         if result.in_sync and (announce or was_offline):
             show_message(main_window, QMessageBox.Information, "Синхронизация", result.text)
-        return result.in_sync
+        return SyncAttempt.IN_SYNC if result.in_sync else SyncAttempt.NOT_SYNCED
 
 
 def has_local_changes(main_window, config: SyncConfig) -> Optional[bool]:
@@ -572,6 +585,16 @@ def has_local_changes(main_window, config: SyncConfig) -> Optional[bool]:
         return make_sync_service(config, main_window.db_manager.db_path).local_changed()
     except Exception:
         return None
+
+
+def last_sync_time(main_window, config: SyncConfig) -> str:
+    """Время последнего обмена с Диском для оператора: «30.09.2026 14:05»;
+    пусто — обмена не было или узнать не удалось. Без сети."""
+    try:
+        value = make_sync_service(config, main_window.db_manager.db_path).last_synced_at()
+    except Exception:
+        return ""
+    return _format_time(value) if value else ""
 
 
 class BackgroundCheck(QThread):

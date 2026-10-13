@@ -1,4 +1,5 @@
 import os
+import time
 
 from PySide2.QtCore import QRectF, Qt, QTimer
 from PySide2.QtGui import QColor, QFont, QIcon, QPainter, QPixmap
@@ -21,8 +22,8 @@ from .settings_screen import SettingsScreen, stop_login_threads
 from .stale_screen import StaleScreen
 from .theme import ASSETS_DIR, Colors, icon_label, icon_pixmap, set_button_icon
 from .sync_flow import (
-    BackgroundCheck, ask_yes_no, describe_error, has_local_changes, message_box,
-    show_message, stop_pending_work, sync_interactive,
+    BackgroundCheck, SyncAttempt, ask_yes_no, describe_error, has_local_changes,
+    last_sync_time, message_box, show_message, stop_pending_work, sync_interactive,
 )
 
 
@@ -47,6 +48,10 @@ _SYNC_ICONS = {
     True: ("cloud-upload", Colors.WARNING),
     None: ("cloud-alert", Colors.WARNING),
 }
+
+# Сколько не пытаться выложить изменения автоматически после того, как Диск
+# оказался недоступен: иначе каждая правка ждала бы его ответа.
+_AUTO_SYNC_PAUSE = 10 * 60
 
 # Экраны, работающие с базой: их пересоздаём, когда базу заменила версия с Диска.
 _DB_SCREENS = {
@@ -139,6 +144,8 @@ class MainWindow(QMainWindow):
         self._screens["settings"] = SettingsScreen(self.db_manager, self)
         self._current_key = "dashboard"
         self._sync_busy = False
+        self._disk_unavailable = False   # последняя попытка обмена: Диск недоступен
+        self._auto_sync_after = 0.0      # time.monotonic(), до которого автосинхронизации нет
         self._startup_check = None
         self._closing = False
 
@@ -225,7 +232,7 @@ class MainWindow(QMainWindow):
         card_layout.addWidget(self.sync_btn)
         layout.addWidget(self.sync_card)
 
-        footer = QLabel("v1.11.0")
+        footer = QLabel("v1.11.1")
         footer.setObjectName("sidebarFooter")
         layout.addWidget(footer)
 
@@ -275,7 +282,18 @@ class MainWindow(QMainWindow):
         self.sync_btn.setVisible(config.is_configured)
         if config.is_configured:
             dirty = has_local_changes(self, config)
-            if dirty is None:
+            if self._disk_unavailable:
+                if dirty is None:
+                    text = "Яндекс.Диск недоступен — не удалось проверить изменения."
+                elif dirty:
+                    text = ("Яндекс.Диск недоступен — есть невыложенные изменения, "
+                            "они выложатся, когда он заработает.")
+                else:
+                    text = "Яндекс.Диск недоступен — невыложенных изменений нет."
+                synced_at = last_sync_time(self, config)
+                if synced_at:
+                    text += f"\nПоследняя синхронизация: {synced_at}"
+            elif dirty is None:
                 text = "Яндекс.Диск: не удалось проверить изменения"
             elif dirty:
                 text = "Яндекс.Диск: есть невыложенные изменения"
@@ -284,28 +302,46 @@ class MainWindow(QMainWindow):
             self.sync_label.setText(text)
             icon_name, color = _SYNC_ICONS[dirty]
             self.sync_icon.setPixmap(icon_pixmap(icon_name, color, 18))
-            # Невыложенные (и непроверенные) изменения должны бросаться в глаза.
-            self.sync_label.setObjectName("syncStatus" if dirty is False else "syncStatusDirty")
+            if self._disk_unavailable:
+                icon_name, color = _SYNC_ICONS[None]
+            # Невыложенные (и непроверенные) изменения и недоступный Диск должны
+            # бросаться в глаза.
+            calm = dirty is False and not self._disk_unavailable
+            self.sync_label.setObjectName("syncStatus" if calm else "syncStatusDirty")
             self.sync_label.style().unpolish(self.sync_label)
             self.sync_label.style().polish(self.sync_label)
 
     def sync_now(self, announce: bool = False, confirm_pull: bool = False,
-                 assume_offline: bool = False) -> bool:
-        """Синхронизировать со всеми диалогами. True — база совпадает с Диском."""
+                 quiet: bool = False) -> bool:
+        """Синхронизировать со всеми диалогами. True — база совпадает с Диском.
+
+        quiet — недоступность Диска без окон, только отметка в боковой панели.
+        """
         config = load_config()
         if not config.is_configured or self._sync_busy:
             return False
         self._sync_busy = True
+        attempt = SyncAttempt.NOT_SYNCED
         try:
-            return sync_interactive(self, config, announce=announce,
-                                    confirm_pull=confirm_pull, assume_offline=assume_offline)
+            attempt = sync_interactive(self, config, announce=announce,
+                                       confirm_pull=confirm_pull, quiet=quiet)
+            return attempt is SyncAttempt.IN_SYNC
         finally:
             self._sync_busy = False
-            self.refresh_sync_indicator()
+            self._note_disk_state(attempt is SyncAttempt.UNAVAILABLE)
+
+    def _note_disk_state(self, unavailable: bool):
+        self._disk_unavailable = unavailable
+        self._auto_sync_after = time.monotonic() + _AUTO_SYNC_PAUSE if unavailable else 0.0
+        self.refresh_sync_indicator()
 
     def on_data_changed(self):
-        """Экран изменил базу: сразу попытаться выложить изменения на Диск."""
-        self.sync_now(confirm_pull=True)
+        """Экран изменил базу: выложить изменения на Диск. Если Диск недавно был
+        недоступен — не ждать его снова: изменения выложит следующая попытка."""
+        if time.monotonic() < self._auto_sync_after:
+            self.refresh_sync_indicator()
+            return
+        self.sync_now(confirm_pull=True, quiet=True)
 
     def startup_sync(self):
         """Проверка Диска при запуске — в фоне, окно не блокируется."""
@@ -345,17 +381,19 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(500, lambda: self._handle_startup_result(error, check))
             return
         if error is not None:
-            if isinstance(error, YaDiskError) and error.is_network_error:
-                # Без интернета молчим, пока выкладывать нечего.
-                if has_local_changes(self, load_config()) is True:
-                    self.sync_now(confirm_pull=True, assume_offline=True)
+            if isinstance(error, YaDiskError) and error.is_unavailable:
+                # Работаем с локальной базой без окон; изменения выложит
+                # следующая удачная синхронизация.
+                self._note_disk_state(True)
                 return
             show_message(self, QMessageBox.Warning, "Синхронизация", describe_error(error))
             return
-        if check.status != SyncStatus.UP_TO_DATE:
-            # Невыложенные с прошлого раза изменения: об успехе сообщаем.
-            self.sync_now(confirm_pull=True,
-                          announce=check.status == SyncStatus.LOCAL_AHEAD)
+        if check.status == SyncStatus.UP_TO_DATE:
+            self._note_disk_state(False)
+            return
+        # Невыложенные с прошлого раза изменения: об успехе сообщаем.
+        self.sync_now(confirm_pull=True, announce=check.status == SyncStatus.LOCAL_AHEAD,
+                      quiet=True)
 
     def _stop_background_sync(self):
         if self._startup_check is not None:
@@ -399,8 +437,15 @@ class MainWindow(QMainWindow):
             return True
         if box.clickedButton() is not push:
             return False
-        if self.sync_now():
+        if self.sync_now(quiet=True):
             return True
+        if self._disk_unavailable:
+            return ask_yes_no(
+                self, "Изменения не выложены",
+                "Яндекс.Диск недоступен. Изменения сохранены на этом компьютере "
+                "и выложатся при следующем запуске программы.\n\nЗакрыть программу?",
+                default_yes=True,
+            )
         return ask_yes_no(
             self, "Изменения не выложены",
             "Изменения так и не выложены на Яндекс.Диск.\nЗакрыть программу?",

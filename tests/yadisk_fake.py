@@ -8,10 +8,13 @@ Authorization: OAuth; выгрузка и скачивание — по ссыл
 папку и при отсутствии родителя. Пути — внутри app:/, ключи files — "/папка/имя".
 
 Для сценариев отказов: offline (соединение обрывается без ответа), fail_next
-(один раз вернуть код на HTTP-метод запроса к API), truncate_gets (скачивание
-обещает больше байт, чем отдаёт), async_ops (перенос и копирование — через
-фоновую операцию), auth_seen (Authorization запросов на выгрузку и скачивание),
-download_location (куда переадресует ссылка на скачивание вместо хранилища).
+(один раз вернуть код на HTTP-метод запроса к API), server_error (код, которым
+API отвечает на все запросы, пока не сброшен в None), fail_ops (перенос и
+копирование не выполняются, их операция завершается статусом failed),
+truncate_gets (скачивание обещает больше байт, чем отдаёт), async_ops (перенос
+и копирование — через фоновую операцию), auth_seen (Authorization запросов на
+выгрузку и скачивание), download_location (куда переадресует ссылка на
+скачивание вместо хранилища).
 """
 import itertools
 import json
@@ -31,6 +34,8 @@ class FakeYaDiskServer:
         self.dirs = {"/"}
         self.requests = []       # (method, путь запроса)
         self.fail_next = {}      # HTTP-метод -> код, который API вернёт один раз
+        self.server_error = None  # код, которым API отвечает на всё
+        self.fail_ops = False
         self.offline = False
         self.truncate_gets = False
         self.async_ops = False
@@ -40,7 +45,7 @@ class FakeYaDiskServer:
         self.download_location = None
         self._uploads = {}       # id -> путь
         self._downloads = {}     # id -> путь
-        self._operations = {}    # id -> сколько раз ещё ответить in-progress
+        self._operations = {}    # id -> [сколько раз ещё ответить in-progress, итог]
         self._ids = itertools.count(1)
         self._lock = threading.Lock()
         server = self
@@ -79,6 +84,8 @@ class FakeYaDiskServer:
                     if url.path.startswith(API):
                         if self.headers.get("Authorization") != f"OAuth {server.token}":
                             return self._error(401, "UnauthorizedError")
+                        if server.server_error is not None:
+                            return self._error(server.server_error, "ServerError")
                         forced = server.fail_next.pop(method, None)
                         if forced is not None:
                             return self._error(forced, "ForcedError")
@@ -119,11 +126,11 @@ class FakeYaDiskServer:
             def _parent(path):
                 return path.rsplit("/", 1)[0] or "/"
 
-            def _operation(self, status=201):
-                if not server.async_ops:
+            def _operation(self, status=201, result="success"):
+                if not server.async_ops and result == "success":
                     return self._reply(status, {"href": "", "method": "GET"})
                 op = str(next(server._ids))
-                server._operations[op] = 1
+                server._operations[op] = [1, result]
                 href = f"{server.url}{API}/operations/{op}"
                 return self._reply(202, {"href": href, "method": "GET", "templated": False})
 
@@ -133,9 +140,9 @@ class FakeYaDiskServer:
                     op = endpoint[len("/operations/"):]
                     if op not in server._operations:
                         return self._error(404, "DiskNotFoundError")
-                    left = server._operations[op]
-                    server._operations[op] = max(0, left - 1)
-                    return self._reply(200, {"status": "in-progress" if left else "success"})
+                    left, result = server._operations[op]
+                    server._operations[op][0] = max(0, left - 1)
+                    return self._reply(200, {"status": "in-progress" if left else result})
                 if path is None:
                     return self._error(400, "FieldValidationError")
                 if endpoint == "/resources" and method == "GET":
@@ -184,6 +191,8 @@ class FakeYaDiskServer:
                         return self._error(409, "DiskPathDoesntExistsError")
                     if path in server.files and query.get("overwrite") != "true":
                         return self._error(409, "DiskResourceAlreadyExistsError")
+                    if server.fail_ops:
+                        return self._operation(result="failed")
                     server.files[path] = server.files[source]
                     if endpoint == "/resources/move":
                         del server.files[source]

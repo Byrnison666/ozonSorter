@@ -320,6 +320,10 @@ class SyncService:
         """Есть ли невыложенные локальные правки. Без обращения к сети."""
         return self._local_differs_from_base(self._local_sha(), self._load_state()["base_sha256"])
 
+    def last_synced_at(self) -> str:
+        """Время последнего обмена с Диском (SAVED_AT_FORMAT); пусто — обмена не было."""
+        return self._load_state()["synced_at"]
+
     def check(self) -> SyncCheck:
         """Сравнить локальную базу с Диском. Если содержимое совпало, запоминает
         ревизию Диска как базовую (так восстанавливается потерянное состояние)."""

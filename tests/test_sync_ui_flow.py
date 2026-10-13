@@ -43,6 +43,7 @@ REAL_ASK_EMPTY_DISK = sync_flow._ask_push_to_empty_disk
 
 CLEAN = "невыложенных изменений нет"
 DIRTY = "есть невыложенные изменения"
+UNAVAILABLE = "Яндекс.Диск недоступен"
 
 
 def _add_client(db_path, ozon_id):
@@ -119,6 +120,8 @@ class SyncUiTestCase(unittest.TestCase):
         self.ask_retry = self._patch("src.ui.sync_flow._ask_retry_offline", return_value=False)
         self.internet = self._patch("src.ui.sync_flow.internet_reachable", return_value=True)
         self.ask_yes_no = self._patch("src.ui.main_window.ask_yes_no", return_value=False)
+        # Повторы запросов при сбое Диска — без настоящих пауз.
+        self._patch_value("src.yadisk_api._RETRY_DELAYS", (0, 0))
 
         self.config = SyncConfig(token=self.server.token, uid=self.server.uid,
                                  login=self.server.login, device_name="ПК")
@@ -369,23 +372,94 @@ class OfflineTest(SyncUiTestCase):
         self.assertEqual(self.messages, [])                      # успех без сбоев — без лишних окон
         self.assertIn(CLEAN, self._indicator())
 
-    def test_data_change_offline_notifies_and_marks_indicator(self):
+    def _change_while_disk_is_down(self):
+        """Синхронизированы, затем правка, а Диск в это время не работает."""
         self.window.on_data_changed()
         _add_client(self.db_path, "222")
-        self.server.offline = True
-        self.ask_retry.return_value = False
         self.window.on_data_changed()
-        self.ask_retry.assert_called_once()
-        self.assertIn(DIRTY, self._indicator())
 
-    def test_data_change_offline_then_online_confirms(self):
+    def _assert_working_locally(self):
+        self.ask_retry.assert_not_called()
+        self.assertEqual(self.messages, [])
+        self.assertIn(UNAVAILABLE, self._indicator())
+        self.assertIn(DIRTY, self._indicator())
+        self.assertIn("Последняя синхронизация", self._indicator())
+        self.assertEqual(_client_ids(self.db_path), ["111", "222"])
+
+    def test_data_change_offline_is_silent_and_marks_indicator(self):
         self.window.on_data_changed()
         _add_client(self.db_path, "222")
         self.server.offline = True
-        self.ask_retry.side_effect = self._go_online_and_retry
         self.window.on_data_changed()
-        self.assertTrue(any("выложены" in t for t in self._texts()))
+        self._assert_working_locally()
+
+    def test_data_change_with_server_error_is_silent(self):
+        self.window.on_data_changed()
+        _add_client(self.db_path, "222")
+        self.server.server_error = 500
+        self.window.on_data_changed()
+        self._assert_working_locally()
+
+    def test_failed_disk_operation_on_push_is_silent(self):
+        # Ошибка 500 могла быть и сбоем переноса файла на самом Диске.
+        self._patch_value("src.yadisk_api._DIRECT_UPLOAD_MAX", 0)
+        self.window.on_data_changed()
+        _add_client(self.db_path, "222")
+        self.server.fail_ops = True
+        self.window.on_data_changed()
+        self._assert_working_locally()
         self.assertEqual(self.other.check().status, SyncStatus.REMOTE_AHEAD)
+        self.other.pull(self.other.check().meta)
+        self.assertEqual(_client_ids(self.other_db), ["111"])    # на Диске прежняя целая база
+
+    def test_no_new_attempts_during_pause_after_failure(self):
+        self.window.on_data_changed()
+        self.server.server_error = 503
+        _add_client(self.db_path, "222")
+        self.window.on_data_changed()
+        requests = len(self.server.requests)
+        for ozon_id in ("333", "444"):
+            _add_client(self.db_path, ozon_id)
+            self.window.on_data_changed()
+        self.assertEqual(len(self.server.requests), requests)   # не ждём Диск на каждой правке
+        self.assertIn(UNAVAILABLE, self._indicator())
+
+    def test_after_pause_change_is_pushed_and_mark_cleared(self):
+        self.window.on_data_changed()
+        _add_client(self.db_path, "222")
+        self.server.server_error = 500
+        self.window.on_data_changed()
+        self.server.server_error = None
+        self.window._auto_sync_after = 0.0          # пауза истекла
+        _add_client(self.db_path, "333")
+        self.window.on_data_changed()
+        self.assertEqual(self.messages, [])
+        self.assertIn(CLEAN, self._indicator())
+        self.assertNotIn(UNAVAILABLE, self._indicator())
+        self._push_from_other("444")
+        self.assertEqual(_client_ids(self.other_db), ["111", "222", "333", "444"])
+
+    def test_manual_sync_ignores_pause_and_explains_local_work(self):
+        self.window.on_data_changed()
+        _add_client(self.db_path, "222")
+        self.server.server_error = 500
+        self.window.on_data_changed()
+        requests = len(self.server.requests)
+        self.assertFalse(self.window.sync_now(announce=True))
+        self.assertGreater(len(self.server.requests), requests)
+        self.assertTrue(any("работать можно" in t for t in self._texts()))
+        self.assertIn(UNAVAILABLE, self._indicator())
+        self.server.server_error = None
+        self.assertTrue(self.window.sync_now(announce=True))
+        self.assertNotIn(UNAVAILABLE, self._indicator())
+
+    def test_insufficient_storage_is_not_hidden(self):
+        self.window.on_data_changed()
+        _add_client(self.db_path, "222")
+        self.server.fail_next["GET"] = 507
+        self.window.on_data_changed()
+        self.assertTrue(any("закончилось место" in t for t in self._texts()))
+        self.assertNotIn(UNAVAILABLE, self._indicator())
 
     def test_indicator_reflects_state(self):
         self.assertIn(DIRTY, self._indicator())
@@ -431,18 +505,32 @@ class StartupCheckTest(SyncUiTestCase):
         self._startup()
         self.ask_retry.assert_not_called()
         self.assertEqual(self.messages, [])
+        self.assertIn(UNAVAILABLE, self._indicator())
+        self.assertIn(CLEAN, self._indicator())
 
-    def test_offline_with_unsynced_changes_offers_retry(self):
+    def test_offline_with_unsynced_changes_is_silent_and_marked(self):
         self.server.offline = True
         self._startup()
-        self.ask_retry.assert_called_once()
+        self.ask_retry.assert_not_called()
+        self.assertEqual(self.messages, [])
+        self.assertIn(UNAVAILABLE, self._indicator())
+        self.assertIn(DIRTY, self._indicator())
 
-    def test_offline_at_startup_then_retry_succeeds_and_confirms(self):
-        self.server.offline = True
-        self.ask_retry.side_effect = lambda *a: setattr(self.server, "offline", False) or True
+    def test_changes_made_while_disk_was_down_are_pushed_at_next_start(self):
+        self.window.sync_now()
+        self.messages.clear()
+        self.server.server_error = 500
         self._startup()
+        _add_client(self.db_path, "222")            # работа с локальной базой
+        self.window.on_data_changed()
+        self.assertEqual(self.messages, [])
+        self.server.server_error = None             # Яндекс починил сервера
+        self._startup()                             # следующий запуск программы
         self.assertTrue(any("выложены" in t for t in self._texts()))
         self.assertIn(CLEAN, self._indicator())
+        self.assertNotIn(UNAVAILABLE, self._indicator())
+        self._push_from_other("333")
+        self.assertEqual(_client_ids(self.other_db), ["111", "222", "333"])
 
     def test_up_to_date_is_silent(self):
         self.window.sync_now()
@@ -470,10 +558,19 @@ class StartupCheckTest(SyncUiTestCase):
         self.assertIn("/OzonSorter/meta.json", self.server.files)
         self.assertTrue(any("выложены" in t for t in self._texts()))
 
-    def test_server_error_at_startup_is_shown(self):
-        self.server.fail_next["GET"] = 500
+    def test_server_error_at_startup_is_silent_and_marked(self):
+        self.server.server_error = 500
         self._startup()
-        self.assertTrue(any("ошибкой 500" in t for t in self._texts()))
+        self.assertEqual(self.messages, [])
+        self.assertIn(UNAVAILABLE, self._indicator())
+
+    def test_short_server_failure_at_startup_passes_unnoticed(self):
+        self.window.sync_now()
+        self.messages.clear()
+        self.server.fail_next["GET"] = 502          # повтор запроса его переживёт
+        self._startup()
+        self.assertEqual(self.messages, [])
+        self.assertNotIn(UNAVAILABLE, self._indicator())
 
     def test_revoked_token_at_startup_is_shown(self):
         self.server.token = "other-token"
@@ -500,16 +597,25 @@ class CloseWindowTest(SyncUiTestCase):
 
     def test_close_push_fails_offline_and_user_keeps_window_open(self):
         self.server.offline = True
-        self.ask_retry.return_value = False
         self.ask_yes_no.return_value = False
         self.assertFalse(self._close("Выложить"))
+        self.ask_retry.assert_not_called()
         self.ask_yes_no.assert_called_once()
+        text = self.ask_yes_no.call_args[0][2]
+        self.assertIn("выложатся при следующем запуске", text)
+        self.assertIs(self.ask_yes_no.call_args[1]["default_yes"], True)
 
     def test_close_push_fails_offline_and_user_closes_anyway(self):
         self.server.offline = True
-        self.ask_retry.return_value = False
         self.ask_yes_no.return_value = True
         self.assertTrue(self._close("Выложить"))
+
+    def test_close_push_fails_with_server_error_and_user_closes(self):
+        self.server.server_error = 500
+        self.ask_yes_no.return_value = True
+        self.assertTrue(self._close("Выложить"))
+        self.assertEqual(self.messages, [])
+        self.assertIn("выложатся при следующем запуске", self.ask_yes_no.call_args[0][2])
 
     def test_close_push_declined_conflict_asks_again(self):
         self.window.sync_now()
@@ -520,6 +626,8 @@ class CloseWindowTest(SyncUiTestCase):
         self.ask_yes_no.return_value = False
         self.assertFalse(self._close("Выложить"))
         self.ask_yes_no.assert_called_once()
+        self.assertIn("так и не выложены", self.ask_yes_no.call_args[0][2])
+        self.assertIs(self.ask_yes_no.call_args[1]["default_yes"], False)
 
     def test_close_ignored_while_sync_is_running(self):
         self.window._sync_busy = True
@@ -608,6 +716,13 @@ class VpnHintTest(SyncUiTestCase):
         text = sync_flow.describe_error(YaDiskError("x", None))
         self.assertIn("VPN", text)
 
+    def test_server_failure_text_says_work_can_go_on(self):
+        for error in (YaDiskError("x", 500), YaDiskError("x", 503), YaDiskError("x", 429)):
+            text = sync_flow.describe_error(error)
+            self.assertIn("работать можно", text)
+            self.assertIn("выложатся", text)
+        self.assertNotIn("работать можно", sync_flow.describe_error(YaDiskError("x", 507)))
+
     def test_other_errors_do_not_blame_vpn(self):
         for error in (YaDiskError("x", 401), YaDiskError("x", 507), YaDiskError("x", 500),
                       SyncError("плохо")):
@@ -659,13 +774,6 @@ class VpnHintTest(SyncUiTestCase):
         self.server.offline = True
         self.window.sync_now()
         self.internet.assert_called_once()
-
-    def test_startup_offline_path_also_reports_connectivity(self):
-        self.server.offline = True
-        self.internet.return_value = True
-        self.window.startup_sync()
-        self._wait(lambda: self.window._startup_check is None)
-        self.assertIs(self.ask_retry.call_args[0][2], True)
 
     def test_unknown_connectivity_when_probe_is_cancelled(self):
         self.server.offline = True
@@ -725,7 +833,7 @@ class StartupResultDeferralTest(SyncUiTestCase):
 
     def test_error_window_is_also_deferred_while_busy(self):
         self.window._sync_busy = True
-        self.window._handle_startup_result(YaDiskError("x", 500), None)
+        self.window._handle_startup_result(YaDiskError("x", 401), None)
         self.assertEqual(self.messages, [])
         self.window._sync_busy = False
         self._wait(lambda: bool(self.messages))
