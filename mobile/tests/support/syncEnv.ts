@@ -104,6 +104,7 @@ export const nodeFiles: LocalFiles = {
   replace: (src, dst) => fs.rename(src, dst),
   copy: (src, dst) => fs.copyFile(src, dst),
   remove: (p) => fs.rm(p, { force: true }),
+  size: async (p) => (await fs.stat(p)).size,
   list: (dir) => fs.readdir(dir),
   mkdirs: async (dir) => {
     await fs.mkdir(dir, { recursive: true });

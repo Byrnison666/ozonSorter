@@ -5,6 +5,7 @@ import { Pressable, StyleSheet, View } from 'react-native';
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { AppProvider, useApp } from './src/app/AppContext';
+import { BackupsScreen } from './src/screens/BackupsScreen';
 import { ClientsScreen } from './src/screens/ClientsScreen';
 import { DashboardScreen } from './src/screens/DashboardScreen';
 import { DuplicatesScreen } from './src/screens/DuplicatesScreen';
@@ -50,6 +51,8 @@ function SyncButton() {
 
 const TABS: Array<{
   name: string; title: string; icon: IconName; component: () => React.JSX.Element; hidden?: boolean;
+  /** Куда ведёт «Назад» скрытой вкладки (по умолчанию «Главная»). */
+  back?: string;
 }> = [
   { name: 'dashboard', title: 'Главная', icon: 'home', component: DashboardScreen },
   { name: 'clients', title: 'Клиенты', icon: 'users', component: ClientsScreen },
@@ -58,6 +61,8 @@ const TABS: Array<{
   { name: 'settings', title: 'Настройки', icon: 'settings', component: SettingsScreen },
   // Без кнопки в панели: вход с плашки «Главной» и из окна после импорта.
   { name: 'duplicates', title: 'Дубли', icon: 'copy', component: DuplicatesScreen, hidden: true },
+  // Вход из «Настроек».
+  { name: 'backups', title: 'Резервные копии', icon: 'archive', component: BackupsScreen, hidden: true, back: 'settings' },
 ];
 
 function Tabs() {
@@ -100,7 +105,7 @@ function Tabs() {
                 <Pressable
                   accessibilityRole="button"
                   accessibilityLabel="Назад"
-                  onPress={() => navigation.navigate('dashboard')}
+                  onPress={() => navigation.navigate(t.back ?? 'dashboard')}
                   hitSlop={8}
                   style={({ pressed }) => [s.bubble, pressed && s.bubblePressed]}
                 >

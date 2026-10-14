@@ -51,6 +51,13 @@ export type SyncStatus = (typeof SyncStatus)[keyof typeof SyncStatus];
 /** Синхронизацию нельзя выполнить; текст показывается пользователю. */
 export class SyncError extends Error {}
 
+/**
+ * Диск отдал испорченные данные: meta.json не разбирается, архив не
+ * распаковывается, сумма не сходится. Так выглядят сбои в дата-центрах
+ * Яндекса — тихие попытки считают это недоступностью Диска.
+ */
+export class RemoteDataError extends SyncError {}
+
 /** Пользователь отменил операцию до того, как она что-либо изменила. */
 export class SyncCancelled extends Error {}
 
@@ -107,6 +114,8 @@ export interface LocalFiles {
   replace(src: string, dst: string): Promise<void>;
   copy(src: string, dst: string): Promise<void>;
   remove(path: string): Promise<void>;
+  /** Размер файла в байтах. */
+  size(path: string): Promise<number>;
   list(dir: string): Promise<string[]>;
   mkdirs(dir: string): Promise<void>;
   join(dir: string, name: string): string;
@@ -189,7 +198,7 @@ function dumpMeta(meta: RemoteMeta): string {
 }
 
 /** Проверить файл базы до того, как он заменит рабочую (или уйдёт на Диск). */
-export function validateDatabase(deps: SyncDeps, path: string): void {
+export function validateDatabase(deps: Pick<SyncDeps, 'openDb'>, path: string): void {
   let db: Db;
   try {
     db = deps.openDb(path);
@@ -217,6 +226,36 @@ export function validateDatabase(deps: SyncDeps, path: string): void {
   }
 }
 
+/** Есть ли в базе клиенты или импорты: пустую нельзя выкладывать поверх Диска и восстанавливать. */
+export function databaseHasData(db: Db): boolean {
+  for (const table of ['clients', 'import_sessions', 'shipments']) {
+    const exists = db.get("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", [table]);
+    if (exists && db.get(`SELECT 1 FROM ${table} LIMIT 1`)) return true;
+  }
+  return false;
+}
+
+/** Копии базы перед заменой (загрузка с Диска, восстановление из копии). */
+export function presyncDir(files: LocalFiles, dbPath: string): string {
+  return files.join(files.join(files.dirname(dbPath), 'backups'), 'presync');
+}
+
+/** Копия текущей базы перед заменой; null — базы нет. Соединения с базой должны быть закрыты. */
+export async function backupBeforeReplace(deps: Pick<SyncDeps, 'files' | 'clock'>, dbPath: string): Promise<string | null> {
+  const { files, clock } = deps;
+  if (!(await files.exists(dbPath))) return null;
+  // Отдельная папка: общая ротация копий не вытеснит сделанные перед заменой.
+  const dir = presyncDir(files, dbPath);
+  await files.mkdirs(dir);
+  const backup = files.join(dir, `ozon_sorter_${stamp(clock.now())}.db.bak`);
+  await files.copy(dbPath, backup);
+  const all = (await files.list(dir)).sort();
+  for (const old of all.slice(0, Math.max(0, all.length - KEEP_PRESYNC_BACKUPS))) {
+    await files.remove(files.join(dir, old));
+  }
+  return backup;
+}
+
 /** gunzip с пределом размера распакованного: защита от gzip-бомбы. */
 function unpack(packed: Uint8Array, maxBytes: number): Uint8Array {
   const chunks: Uint8Array[] = [];
@@ -233,10 +272,10 @@ function unpack(packed: Uint8Array, maxBytes: number): Uint8Array {
       gunzip.push(packed.subarray(i, i + step), i + step >= packed.length);
     }
   } catch {
-    throw new SyncError('Файл базы на Диске повреждён.');
+    throw new RemoteDataError('Файл базы на Диске повреждён.');
   }
   if (tooBig) throw new SyncError('Файл базы на Диске слишком большой и не может быть загружен.');
-  if (packed.length === 0) throw new SyncError('Файл базы на Диске повреждён.');
+  if (packed.length === 0) throw new RemoteDataError('Файл базы на Диске повреждён.');
   const out = new Uint8Array(total);
   let offset = 0;
   for (const c of chunks) {
@@ -271,7 +310,7 @@ export class SyncService {
   private readonly maxDbBytes: number;
   private rollback: { backup: string | null; state: State } | null = null;
 
-  constructor(private readonly deps: SyncDeps, opts: SyncOptions) {
+  constructor(private readonly deps: SyncDeps, private readonly opts: SyncOptions) {
     this.dbPath = opts.dbPath;
     this.client = opts.client;
     this.remoteDir = opts.remoteDir.replace(/^\/+|\/+$/g, '');
@@ -320,11 +359,15 @@ export class SyncService {
     }
   }
 
-  private async readLocal(): Promise<Uint8Array> {
+  private async checkNoJournal(): Promise<void> {
     // Оставшийся журнал — незавершённая запись: файл без него несогласован.
     if (await this.deps.files.exists(`${this.dbPath}-journal`)) {
       throw new SyncError('База занята незавершённой записью. Перезапустите приложение.');
     }
+  }
+
+  private async readLocal(): Promise<Uint8Array> {
+    await this.checkNoJournal();
     return this.deps.files.read(this.dbPath);
   }
 
@@ -343,11 +386,7 @@ export class SyncService {
       throw new SyncError(`Файл базы на этом устройстве повреждён: ${(e as Error).message}`);
     }
     try {
-      for (const table of ['clients', 'import_sessions', 'shipments']) {
-        const exists = db.get("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", [table]);
-        if (exists && db.get(`SELECT 1 FROM ${table} LIMIT 1`)) return false;
-      }
-      return true;
+      return !databaseHasData(db);
     } catch (e) {
       throw new SyncError(`Файл базы на этом устройстве повреждён: ${(e as Error).message}`);
     } finally {
@@ -365,11 +404,27 @@ export class SyncService {
     try {
       return parseMeta(raw);
     } catch {
-      throw new SyncError(`Файл ${META_NAME} на Диске повреждён.`);
+      throw new RemoteDataError(`Файл ${META_NAME} на Диске повреждён.`);
     }
   }
 
   // --- операции ---
+
+  /**
+   * Снимок базы для обмена без рабочего файла: побайтная копия рядом с базой и
+   * обмен над ней (то же состояние синхронизации, тот же Диск). Сумма снимка
+   * совпадает с суммой рабочей базы, пока её не правили. Соединения с базой
+   * должны быть закрыты только на время вызова; discard() удаляет снимок.
+   */
+  async snapshot(): Promise<{ service: SyncService; discard(): Promise<void> }> {
+    await this.checkNoJournal();
+    const path = `${this.dbPath}.snapshot`;
+    await this.deps.files.copy(this.dbPath, path);
+    return {
+      service: new SyncService(this.deps, { ...this.opts, dbPath: path }),
+      discard: () => this.deps.files.remove(path),
+    };
+  }
 
   /** Есть ли невыложенные правки. Без сети. */
   async localChanged(): Promise<boolean> {
@@ -525,7 +580,7 @@ export class SyncService {
     const raw = unpack(packed, this.maxDbBytes);
     // Сумма лежит рядом с файлом и защищает только от порчи при передаче.
     if ((await this.deps.sha256(raw)) !== meta.sha256) {
-      throw new SyncError('Файл базы на Диске не совпадает с контрольной суммой. Повторите позже.');
+      throw new RemoteDataError('Файл базы на Диске не совпадает с контрольной суммой. Повторите позже.');
     }
 
     const tmp = `${this.dbPath}.sync-tmp`;
@@ -533,7 +588,7 @@ export class SyncService {
       await this.deps.files.write(tmp, raw);
       validateDatabase(this.deps, tmp);
       token.commit();
-      this.rollback = { backup: await this.backupLocal(), state: await this.loadState() };
+      this.rollback = { backup: await backupBeforeReplace(this.deps, this.dbPath), state: await this.loadState() };
       await this.deps.files.replace(tmp, this.dbPath);
     } finally {
       if (await this.deps.files.exists(tmp)) await this.deps.files.remove(tmp);
@@ -560,22 +615,6 @@ export class SyncService {
     // Только после успешной замены: при сбое откат можно повторить.
     this.rollback = null;
     await this.saveState(state.base_rev, state.base_sha256, state.synced_at);
-  }
-
-  /** Копия текущей базы перед заменой; null — базы нет. */
-  private async backupLocal(): Promise<string | null> {
-    const { files, clock } = this.deps;
-    if (!(await files.exists(this.dbPath))) return null;
-    // Отдельная папка: общая ротация копий не вытеснит сделанные перед заменой.
-    const dir = files.join(files.join(files.dirname(this.dbPath), 'backups'), 'presync');
-    await files.mkdirs(dir);
-    const backup = files.join(dir, `ozon_sorter_${stamp(clock.now())}.db.bak`);
-    await files.copy(this.dbPath, backup);
-    const all = (await files.list(dir)).sort();
-    for (const old of all.slice(0, Math.max(0, all.length - KEEP_PRESYNC_BACKUPS))) {
-      await files.remove(files.join(dir, old));
-    }
-    return backup;
   }
 }
 

@@ -4,7 +4,7 @@
  * поэтому сценарий проверяется тестами без экрана.
  */
 import {
-  CancelToken, SyncCancelled, type SyncCheck, SyncError, SyncService, SyncStatus,
+  CancelToken, RemoteDataError, SyncCancelled, type SyncCheck, SyncError, SyncService, SyncStatus,
 } from './syncService';
 import { type Progress, YaDiskError } from './yadisk';
 import { OAuthError } from './yandexOAuth';
@@ -45,6 +45,18 @@ export interface DbHost {
   reload(): void;
 }
 
+const WORK_LOCALLY = 'База сохранена на этом телефоне, работать можно — изменения выложатся, когда Диск заработает.';
+
+/**
+ * Сбой Диска, который проходит сам: недоступность либо испорченный ответ
+ * (так выглядят сбои в дата-центрах Яндекса). Тихие попытки считают его
+ * недоступностью: отметка, пауза автосинхронизации, без окон.
+ */
+export function isDiskGlitch(error: unknown): boolean {
+  return (error instanceof YaDiskError && (error.isUnavailable || error.isBadResponse))
+    || error instanceof RemoteDataError;
+}
+
 export function describeError(error: unknown): string {
   if (error instanceof YaDiskError) {
     if (error.isAuthError) {
@@ -56,11 +68,12 @@ export function describeError(error: unknown): string {
     if (error.isNetworkError) return `Нет связи с Яндекс.Диском. Проверьте интернет и повторите.\n${VPN_HINT}`;
     if (error.status === 507) return 'На Яндекс.Диске закончилось место.';
     if (error.isUnavailable) {
-      return `Яндекс.Диск сейчас не работает (сбой на стороне Яндекса, код ${error.status}).\n` +
-        'База сохранена на этом телефоне, работать можно — изменения выложатся, когда Диск заработает.';
+      return `Яндекс.Диск сейчас не работает (сбой на стороне Яндекса, код ${error.status}).\n${WORK_LOCALLY}`;
     }
+    if (error.isBadResponse) return `Яндекс.Диск прислал непонятный ответ (сбой на стороне Яндекса).\n${WORK_LOCALLY}`;
     return `Яндекс.Диск ответил ошибкой ${error.status}. Повторите позже.`;
   }
+  if (error instanceof RemoteDataError) return `${error.message}\n${WORK_LOCALLY}`;
   if (error instanceof SyncError) return error.message;
   return `Не удалось выполнить синхронизацию:\n${(error as Error)?.message ?? String(error)}`;
 }
@@ -261,7 +274,10 @@ export async function syncInteractive(
       result = await synchronize(service, host, ui, confirmPull);
     } catch (e) {
       if (e instanceof SyncCancelled) return 'NOT_SYNCED';
-      if (e instanceof YaDiskError && e.isUnavailable && quiet) return 'UNAVAILABLE';
+      if (quiet && isDiskGlitch(e)) {
+        console.warn('Quiet sync: Disk is unavailable', e);
+        return 'UNAVAILABLE';
+      }
       if (e instanceof YaDiskError && e.isNetworkError) {
         if (await ui.askRetryOffline((await hasLocalChanges(service)) === true, await probe())) {
           wasOffline = true;
@@ -269,7 +285,7 @@ export async function syncInteractive(
         }
         return 'UNAVAILABLE';
       }
-      if (e instanceof YaDiskError && e.isUnavailable) {
+      if (isDiskGlitch(e)) {
         await ui.showMessage('warning', 'Яндекс.Диск недоступен', describeError(e));
         return 'UNAVAILABLE';
       }
@@ -294,7 +310,10 @@ export async function startupAction(service: SyncService): Promise<StartupAction
     check = await service.check();
   } catch (e) {
     // Работаем с базой телефона без окон; изменения выложит следующая удачная синхронизация.
-    if (e instanceof YaDiskError && e.isUnavailable) return { kind: 'unavailable' };
+    if (isDiskGlitch(e)) {
+      console.warn('Startup check: Disk is unavailable', e);
+      return { kind: 'unavailable' };
+    }
     return { kind: 'warn', text: describeError(e) };
   }
   if (check.status === SyncStatus.UP_TO_DATE) return { kind: 'none' };
@@ -307,22 +326,51 @@ export async function startupAction(service: SyncService): Promise<StartupAction
  * когда Диск не менялся (LOCAL_AHEAD). Конфликт и загрузку решит пользователь,
  * когда вернётся. Возвращает номер выложенной ревизии; 'UNAVAILABLE' — Диск
  * недоступен; null — выкладывать нечего или нельзя без вопросов.
+ *
+ * Обмен идёт со снимком базы: основная база закрыта только на время его
+ * копирования, onSnapshot — она снова открыта и с ней можно работать, пока
+ * снимок уходит на Диск. Состояние синхронизации запоминает сумму снимка,
+ * поэтому правки, сделанные во время выгрузки, остаются невыложенными.
+ * Снимок — побайтная копия, а не VACUUM INTO (тот не закрывал бы базу и на
+ * миг): VACUUM пересобирает файл, и сумма копии отличалась бы от суммы
+ * рабочей базы — после каждой фоновой выгрузки база выглядела бы изменённой
+ * и уходила бы на Диск лишней ревизией.
  */
-export async function backgroundPush(service: SyncService, host: DbHost): Promise<number | 'UNAVAILABLE' | null> {
+export async function backgroundPush(
+  service: SyncService, host: DbHost, onSnapshot?: () => void,
+): Promise<number | 'UNAVAILABLE' | null> {
+  let snapshot: { service: SyncService; discard(): Promise<void> } | null = null;
   try {
     if ((await hasLocalChanges(service)) !== true) return null;
     host.release();
     try {
-      const check = await service.check();
-      if (check.status !== SyncStatus.LOCAL_AHEAD) return null;
-      return await service.push(check.meta);
+      snapshot = await service.snapshot();
     } finally {
       host.reload();
     }
+    onSnapshot?.();
+    const check = await snapshot.service.check();
+    if (check.status !== SyncStatus.LOCAL_AHEAD) return null;
+    return await snapshot.service.push(check.meta);
   } catch (e) {
     console.warn('Background push failed', e);
-    return e instanceof YaDiskError && e.isUnavailable ? 'UNAVAILABLE' : null;
+    return isDiskGlitch(e) ? 'UNAVAILABLE' : null;
+  } finally {
+    await snapshot?.discard().catch((e) => console.warn('Database snapshot was not removed', e));
   }
+}
+
+/**
+ * Обменяться сразу после фоновой выгрузки: правки, сделанные во время неё,
+ * иначе ждали бы следующего повода. Не при открытом выборе файла или
+ * «Поделиться»: экспорт ждёт там между файлом и отметкой посылок, и обмен,
+ * заменив базу, оставил бы отметку не в той базе. Импорт и экспорт по
+ * окончании сами запускают обмен.
+ */
+export function syncAfterBackground(s: {
+  changed: boolean; active: boolean; externalOpen: number; now: number; autoSyncAfter: number;
+}): boolean {
+  return s.changed && s.active && s.externalOpen === 0 && s.now >= s.autoSyncAfter;
 }
 
 /** Скорость, ниже которой передача считается медленной (байт/с), — как на ПК. */

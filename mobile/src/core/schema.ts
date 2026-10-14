@@ -24,6 +24,29 @@ const DDL: readonly string[] = [
   'CREATE TABLE export_sessions (\n\tid INTEGER NOT NULL, \n\timport_session_id INTEGER NOT NULL, \n\tdelivery_point VARCHAR(15) NOT NULL, \n\texport_date DATETIME NOT NULL, \n\tfile_path VARCHAR NOT NULL, \n\tshipments_count INTEGER NOT NULL, \n\tcreated_at DATETIME NOT NULL, \n\tPRIMARY KEY (id), \n\tFOREIGN KEY(import_session_id) REFERENCES import_sessions (id)\n)',
 ];
 
+const CONSTRAINT_WORDS = new Set(['PRIMARY', 'UNIQUE', 'CONSTRAINT', 'FOREIGN', 'CHECK']);
+
+/** Колонки таблиц свежей базы — из DDL. */
+const COLUMNS: ReadonlyArray<readonly [string, readonly string[]]> = DDL.flatMap((sql) => {
+  const m = /^CREATE TABLE (\w+) \(\n([\s\S]*)\n\)$/.exec(sql);
+  if (!m) return [];
+  const columns = m[2].split(', \n').map((line) => line.trim().split(/[\s(]/)[0]);
+  return [[m[1], columns.filter((name) => !CONSTRAINT_WORDS.has(name))] as const];
+});
+
+/**
+ * Колонки свежей схемы, которых нет в базе (`таблица.колонка`). Базы ПК после
+ * старых миграций имеют те же колонки, только в другом порядке.
+ */
+export function missingColumns(db: Db): string[] {
+  const missing: string[] = [];
+  for (const [table, columns] of COLUMNS) {
+    const present = new Set(db.all<{ name: string }>(`SELECT name FROM pragma_table_info('${table}')`).map((r) => r.name));
+    for (const column of columns) if (!present.has(column)) missing.push(`${table}.${column}`);
+  }
+  return missing;
+}
+
 export class SchemaError extends Error {}
 
 /** Настройки соединения — как на ПК: журнал DELETE (файл базы всегда цельный

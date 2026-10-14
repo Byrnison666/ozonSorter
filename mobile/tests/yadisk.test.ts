@@ -277,6 +277,17 @@ describe('клиент Диска', () => {
     expect(new YaDiskError('x', null, true).isUnavailable).toBe(false); // TLS сам не пройдёт
   });
 
+  test('непонятный ответ: успешный статус, но не то, что ждали', async () => {
+    for (const status of [200, 201, 202]) expect(new YaDiskError('x', status).isBadResponse).toBe(true);
+    for (const status of [null, 0, 404, 500]) expect(new YaDiskError('x', status).isBadResponse).toBe(false);
+    const page = new TextEncoder().encode('<html>maintenance</html>');
+    const { transport } = routes({ [`GET ${API}/resources/download`]: () => ({ status: 200, body: page }) });
+    const err = await new YaDiskClient('t', API, transport, 5_000, [0, 0]).get('a.db').catch((e) => e);
+    expect(err).toBeInstanceOf(YaDiskError);
+    expect(err.isBadResponse).toBe(true);
+    expect(err.isUnavailable).toBe(false);
+  });
+
   test('чтение повторяется после временного сбоя, не больше двух раз', async () => {
     let failures = 1;
     const { transport, log } = routes({

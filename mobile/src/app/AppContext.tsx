@@ -4,6 +4,7 @@
  * каждой правки, проверка при запуске; вместо «при закрытии» — тихая выгрузка
  * при уходе в фон. Когда Диск недоступен, работа идёт с базой телефона:
  * автоматические попытки молчат и на время замолкают, на «Главной» — плашка.
+ * Независимо от Диска раз в день делается копия базы на телефоне.
  */
 import {
   createContext, type ReactNode, useCallback, useContext, useEffect, useMemo, useRef, useState,
@@ -11,11 +12,12 @@ import {
 import { ActivityIndicator, Alert, AppState, Modal, StyleSheet, View } from 'react-native';
 
 import type { Db } from '../core/db';
+import { dailyBackup, restoreDatabase } from '../core/localBackup';
 import { configureConnection, ensureSchema } from '../core/schema';
 import { defaultConfig, isConfigured, needsRefresh, type SyncConfig, targetId } from '../core/sync/config';
 import {
   backgroundPush, type DbHost, formatTime, hasLocalChanges, type InteractiveOptions, SLOW_SPEED, SpeedMeter,
-  startupAction, type SyncAttempt, syncInteractive, type SyncUi, texts, transferText, VPN_HINT,
+  startupAction, type SyncAttempt, syncAfterBackground, syncInteractive, type SyncUi, texts, transferText, VPN_HINT,
 } from '../core/sync/flow';
 import { CancelToken, SyncCancelled, SyncError, SyncService } from '../core/sync/syncService';
 import { type Progress, YaDiskClient } from '../core/sync/yadisk';
@@ -60,8 +62,10 @@ interface AppApi {
    * но выгрузку при этом не начинаем — база нужна сразу после возврата.
    */
   external<T>(fn: () => Promise<T>): Promise<T>;
-  /** Дождаться конца фоновой выгрузки, если она идёт: база на это время закрыта. */
+  /** Дождаться, пока фоновая выгрузка снимет копию базы: база на это время закрыта. */
   dbReady(): Promise<void>;
+  /** Заменить базу копией (файлом SQLite); бросает SyncError с текстом для пользователя. */
+  restoreBackup(source: string): Promise<void>;
   /** Долгая локальная операция под индикатором (без отмены). */
   runBusy<T>(text: string, fn: () => T | Promise<T>): Promise<T>;
   ask: typeof ask;
@@ -134,7 +138,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
   // До этого момента (Date.now) автоматических попыток нет.
   const autoSyncAfter = useRef(0);
   const externalOpen = useRef(0);
+  // Фоновая выгрузка, пока база закрыта ради снимка; сама выгрузка идёт дольше.
   const backgroundRun = useRef<Promise<void> | null>(null);
+  // Базу правили, пока шла фоновая выгрузка: выложить, когда она закончится.
+  const changedWhileBusy = useRef(false);
   const [progress, setProgress] = useState<Busy | null>(null);
   // Отменённые операции ещё ждут сеть; новые не начинаем, пока они не закончатся.
   const abandoned = useRef(new Set<Promise<unknown>>());
@@ -344,7 +351,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const onDataChanged = useCallback(() => {
     setVersion((v) => v + 1);
-    if (Date.now() < autoSyncAfter.current) {
+    if (busyRef.current) changedWhileBusy.current = true;
+    if (busyRef.current || Date.now() < autoSyncAfter.current) {
       void refreshDirty();
       return;
     }
@@ -365,6 +373,24 @@ export function AppProvider({ children }: { children: ReactNode }) {
     if (run) await runBusy('Завершается обмен с Яндекс.Диском…', () => run);
   }, [runBusy]);
 
+  const restoreBackup = useCallback(async (source: string) => {
+    await dbReady();
+    if (busyRef.current) throw new SyncError('Идёт обмен с Яндекс.Диском. Повторите, когда он закончится.');
+    busyRef.current = true;
+    try {
+      await runBusy('Восстановление базы…', () => restoreDatabase(deviceDeps, DB_PATH, source, host));
+    } finally {
+      busyRef.current = false;
+      void refreshDirty();
+    }
+  }, [dbReady, host, refreshDirty, runBusy]);
+
+  /** Копия базы за сегодня, если её ещё нет; сбой — только в журнал. */
+  const backupToday = useCallback(() => {
+    if (!dbRef.current || busyRef.current) return;
+    void dailyBackup(deviceDeps, DB_PATH, db);
+  }, [db]);
+
   const saveSettings = useCallback(async (c: SyncConfig) => {
     await saveConfig(c);
     configRef.current = c;
@@ -380,6 +406,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     let alive = true;
     try {
       host.reload();
+      backupToday();
     } catch {
       // ошибка показана через dbError
     }
@@ -399,34 +426,62 @@ export function AppProvider({ children }: { children: ReactNode }) {
     return () => {
       alive = false;
     };
-  }, [freshConfig, host, makeService, noteDiskState, refreshDirty, syncNow]);
+  }, [backupToday, freshConfig, host, makeService, noteDiskState, refreshDirty, syncNow]);
 
   // Уход в фон вместо «закрытия программы»: тихо выложить, если можно.
+  // Возврат — копия базы за день (телефон могут не закрывать сутками).
   useEffect(() => {
     const sub = AppState.addEventListener('change', (state) => {
+      if (state === 'active') backupToday();
       if (state !== 'background' || busyRef.current || externalOpen.current) return;
       if (Date.now() < autoSyncAfter.current) return;
       const c = configRef.current;
       if (!isConfigured(c)) return;
       busyRef.current = true;
-      backgroundRun.current = (async () => {
+      changedWhileBusy.current = false;
+      let snapshotTaken = () => {};
+      backgroundRun.current = new Promise<void>((resolve) => {
+        snapshotTaken = resolve;
+      });
+      const onSnapshot = () => {
+        // База снова открыта; выгрузка снимка ещё идёт — ручную синхронизацию не даём.
+        backgroundRun.current = null;
+        snapshotTaken();
+        setSyncBusy(true);
+      };
+      void (async () => {
         try {
-          const pushed = await backgroundPush(await makeService(c), host);
+          const pushed = await backgroundPush(await makeService(c), host, onSnapshot);
           if (pushed === 'UNAVAILABLE') noteDiskState(true);
           else if (pushed !== null) noteDiskState(false);
         } finally {
-          busyRef.current = false;
           backgroundRun.current = null;
-          void refreshDirty();
+          snapshotTaken();
+          busyRef.current = false;
+          setSyncBusy(false);
+          const changed = changedWhileBusy.current;
+          changedWhileBusy.current = false;
+          if (syncAfterBackground({
+            changed,
+            active: AppState.currentState === 'active',
+            externalOpen: externalOpen.current,
+            now: Date.now(),
+            autoSyncAfter: autoSyncAfter.current,
+          })) {
+            void syncNow({ confirmPull: true, quiet: true });
+          } else {
+            void refreshDirty();
+          }
         }
       })();
     });
     return () => sub.remove();
-  }, [host, makeService, noteDiskState, refreshDirty]);
+  }, [backupToday, host, makeService, noteDiskState, refreshDirty, syncNow]);
 
   const api: AppApi = {
     db, dbError, version, config, saveSettings, configured: isConfigured(config), dirty, syncBusy,
-    diskUnavailable, lastSync, syncNow, onDataChanged, external, dbReady, runBusy, ask, message: messageBox,
+    diskUnavailable, lastSync, syncNow, onDataChanged, external, dbReady, restoreBackup, runBusy, ask,
+    message: messageBox,
   };
 
   return (

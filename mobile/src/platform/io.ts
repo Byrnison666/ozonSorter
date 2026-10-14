@@ -46,6 +46,40 @@ export async function shareXlsx(bytes: Uint8Array, fileName: string, title: stri
   return name;
 }
 
+/**
+ * Выбрать файл базы для восстановления. Он копируется в папку данных под
+ * постоянным именем (обычный путь, как у самой базы); вызывающий удаляет его
+ * по окончании. null — пользователь отказался.
+ */
+export async function pickDatabaseFile(dataDir: string): Promise<{ name: string; path: string } | null> {
+  const result = await DocumentPicker.getDocumentAsync({
+    // У файлов SQLite MIME обычно не определён: «любой файл», проверка — по содержимому.
+    type: '*/*',
+    copyToCacheDirectory: true,
+    multiple: false,
+  });
+  if (result.canceled || !result.assets?.length) return null;
+  const asset = result.assets[0];
+  const picked = new File(asset.uri);
+  try {
+    const path = `${dataDir}/restore-picked.db`;
+    const target = new File(`file://${path}`);
+    if (target.exists) target.delete();
+    picked.copy(target);
+    return { name: asset.name, path };
+  } finally {
+    if (picked.exists) picked.delete(); // копия во временной папке больше не нужна
+  }
+}
+
+/** Отправить копию базы («Поделиться»): Telegram, почта, компьютер. */
+export async function shareDatabaseFile(path: string, title: string): Promise<void> {
+  if (!(await Sharing.isAvailableAsync())) {
+    throw new Error('На этом устройстве нельзя поделиться файлом.');
+  }
+  await Sharing.shareAsync(`file://${path}`, { mimeType: 'application/octet-stream', dialogTitle: title });
+}
+
 /** Отвечает ли интернет вообще (адрес, не связанный с Яндексом). */
 export async function probeInternet(timeoutMs = 3000): Promise<boolean> {
   const controller = new AbortController();

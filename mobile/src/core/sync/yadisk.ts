@@ -62,6 +62,15 @@ export class YaDiskError extends Error {
   get isUnavailable(): boolean {
     return this.isNetworkError || (this.status !== null && isTransient(this.status));
   }
+
+  /**
+   * Диск ответил «успешно», но не тем (HTML-страница вместо JSON, нет ссылки):
+   * так выглядят сбои в дата-центрах Яндекса. Отдельно от isUnavailable —
+   * его смысл (5xx, нет связи) повторы чтения в api() не меняют.
+   */
+  get isBadResponse(): boolean {
+    return this.status !== null && this.status >= 200 && this.status < 300;
+  }
 }
 
 export interface HttpRequest {

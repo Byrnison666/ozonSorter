@@ -34,6 +34,7 @@ export const expoFiles: LocalFiles = {
     const f = new File(uri(p));
     if (f.exists) f.delete();
   },
+  size: async (p) => new File(uri(p)).size,
   async list(dir) {
     return new Directory(uri(dir)).list()
       .map((entry) => decodeURIComponent(entry.uri.replace(/\/+$/, '').split('/').pop() ?? ''));

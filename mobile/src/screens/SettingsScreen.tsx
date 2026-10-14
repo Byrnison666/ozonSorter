@@ -1,4 +1,8 @@
-/** «Настройки» — Яндекс.Диск (settings_screen.py ПК): вход по коду, имя устройства, ручная синхронизация. */
+/**
+ * «Настройки» — Яндекс.Диск (settings_screen.py ПК): вход по коду, имя устройства, ручная синхронизация;
+ * переход к резервным копиям базы на телефоне.
+ */
+import { type NavigationProp, type ParamListBase, useNavigation } from '@react-navigation/native';
 import { useEffect, useRef, useState } from 'react';
 import { Linking, StyleSheet } from 'react-native';
 
@@ -19,6 +23,7 @@ const hhmm = (d: Date) => `${String(d.getHours()).padStart(2, '0')}:${String(d.g
 
 export function SettingsScreen() {
   const app = useApp();
+  const navigation = useNavigation<NavigationProp<ParamListBase>>();
   const [deviceName, setDeviceName] = useState('');
   const [status, setStatus] = useState('');
   // Идёт вход: code null — код ещё запрашивается.
@@ -167,6 +172,9 @@ export function SettingsScreen() {
         Работайте по очереди: перед работой на телефоне база загружается с Диска, после правок — выкладывается.
         Если изменить базу и на компьютере, и на телефоне, приложение предложит выбрать одну версию.
       </Text>
+      <Card title="Резервные копии" subtitle="Копии базы на этом телефоне — на случай, если Яндекс.Диск недоступен.">
+        <Button icon="archive" title="Резервные копии" onPress={() => navigation.navigate('backups')} />
+      </Card>
     </Screen>
   );
 }

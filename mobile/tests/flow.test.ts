@@ -4,16 +4,17 @@
  * и общий тестовый «Яндекс.Диск».
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { gzipSync } from 'node:zlib';
 
 import {
-  backgroundPush, type DbHost, startupAction, syncInteractive, synchronize, type SyncUi, texts,
+  backgroundPush, type DbHost, startupAction, syncAfterBackground, syncInteractive, synchronize, type SyncUi, texts,
 } from '../src/core/sync/flow';
 import { CancelToken, SyncCancelled, type SyncCheck } from '../src/core/sync/syncService';
-import type { Progress } from '../src/core/sync/yadisk';
+import { type Progress, YaDiskClient } from '../src/core/sync/yadisk';
 import { tempDir } from './support/pc';
-import { type DavServer, Phone, startDavServer } from './support/syncEnv';
+import { type DavServer, Phone, startDavServer, testTransport } from './support/syncEnv';
 
 class FakeUi implements SyncUi {
   calls: string[] = [];
@@ -305,6 +306,68 @@ describe('Яндекс.Диск недоступен: автоматически
   });
 });
 
+describe('испорченный ответ Диска — как недоступность', () => {
+  for (const [name, flags] of [
+    ['API отвечает страницей вместо JSON', { garbage_api: true }],
+    ['хранилище отдаёт страницу вместо файла', { garbage_gets: true }],
+  ] as const) {
+    test(`${name}: тихая попытка — без окон, база телефона цела`, async () => {
+      await seed();
+      a.addClient('222');
+      await server.control({ cmd: 'set', ...flags });
+      expect(await syncInteractive(a.sync, host, ui, online, { confirmPull: true, quiet: true }))
+        .toBe('UNAVAILABLE');
+      expect(ui.messages).toEqual([]);
+      expect(ui.calls.filter((c) => c.startsWith('retry'))).toEqual([]);
+      expect(host.log.at(-1)).toBe('reload');
+      expect(a.clientIds()).toEqual(['111', '222']);
+      expect(await a.sync.localChanged()).toBe(true);
+    });
+  }
+
+  /** Ревизия 2 выложена с B; её файл на Диске подменяется content. */
+  async function spoilRevision(content: Uint8Array) {
+    await seed();
+    b.addClient('222');
+    await b.push();
+    const file = (await server.list()).find((f) => /ozon_sorter_rev000002_.*\.db\.gz$/.test(f))!;
+    await server.put(file, content);
+  }
+
+  for (const [name, content] of [
+    ['сумма загруженной базы не совпала', () => gzipSync(new TextEncoder().encode('другая база'))],
+    ['файл ревизии — не gzip', () => new TextEncoder().encode('<html>502</html>')],
+  ] as const) {
+    test(`${name}: тихая загрузка — без окон, база телефона цела`, async () => {
+      await spoilRevision(content());
+      expect(await syncInteractive(a.sync, host, ui, online, { confirmPull: true, quiet: true }))
+        .toBe('UNAVAILABLE');
+      expect(ui.messages).toEqual([]);
+      expect(host.log.at(-1)).toBe('reload');
+      expect(a.clientIds()).toEqual(['111']);
+    });
+  }
+
+  test('ручной запуск показывает окно: непонятный ответ, работать можно', async () => {
+    a.addClient('111');
+    await server.control({ cmd: 'set', garbage_api: true });
+    expect(await syncInteractive(a.sync, host, ui, online, { announce: true })).toBe('UNAVAILABLE');
+    expect(ui.messages).toHaveLength(1);
+    expect(ui.messages[0][0]).toBe('warning');
+    expect(ui.messages[0][1]).toContain('непонятный ответ');
+    expect(ui.messages[0][1]).toContain('работать можно');
+    expect(ui.calls.filter((c) => c.startsWith('retry'))).toEqual([]);
+  });
+
+  test('ручной запуск: испорченная ревизия — окно, база цела', async () => {
+    await spoilRevision(new TextEncoder().encode('<html>502</html>'));
+    expect(await syncInteractive(a.sync, host, ui, online, { announce: true })).toBe('UNAVAILABLE');
+    expect(ui.messages).toHaveLength(1);
+    expect(ui.messages[0][1]).toContain('работать можно');
+    expect(a.clientIds()).toEqual(['111']);
+  });
+});
+
 describe('запуск и уход в фон', () => {
   test('при запуске: совпадает — ничего; правки с прошлого раза — выложить с сообщением', async () => {
     expect(await startupAction(a.sync)).toEqual({ kind: 'none' });
@@ -328,10 +391,9 @@ describe('запуск и уход в фон', () => {
     expect(await a.sync.lastSyncedAt()).toMatch(/^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d$/);
   });
 
-  test('при запуске с битым meta.json — предупреждение', async () => {
+  test('при запуске с битым meta.json — как недоступность, без окна', async () => {
     await server.put('/OzonSorter/meta.json', '{oops');
-    const action = await startupAction(a.sync);
-    expect(action.kind).toBe('warn');
+    expect(await startupAction(a.sync)).toEqual({ kind: 'unavailable' });
   });
 
   test('в фоне выкладываем только когда Диск не менялся', async () => {
@@ -346,16 +408,85 @@ describe('запуск и уход в фон', () => {
 
   test('в фоне Диск недоступен — приложение не падает, база снова открыта', async () => {
     a.addClient('111');
-    for (const flags of [{ offline: true }, { server_error: 500 }]) {
-      await server.control({ cmd: 'set', offline: false, server_error: null, ...flags });
+    for (const flags of [{ offline: true }, { server_error: 500 }, { garbage_api: true }]) {
+      await server.control({ cmd: 'set', offline: false, server_error: null, garbage_api: false, ...flags });
       expect(await backgroundPush(a.sync, host)).toBe('UNAVAILABLE');
       expect(host.log.at(-1)).toBe('reload');
     }
+    expect(existsSync(`${a.dbPath}.snapshot`)).toBe(false);
+  });
+
+  test('в фоне выгружается снимок: база закрыта только на время копии, правки во время выгрузки — невыложенные', async () => {
+    await seed();
+    // Запросы к Диску отмечаются в том же журнале, что закрытие и открытие базы.
+    const recording = {
+      request: (req: Parameters<typeof testTransport.request>[0]) => {
+        host.log.push('net');
+        return testTransport.request(req);
+      },
+    };
+    const p = new Phone(b.dir, server, {
+      client: new YaDiskClient('test-token', server.apiUrl, recording, 5_000, [0, 0]),
+    });
+    p.addClient('222');
+    const rev = await backgroundPush(p.sync, host, () => {
+      host.log.push('snapshot');
+      p.addClient('333'); // база снова открыта: правка, пока снимок уходит на Диск
+    });
+    expect(rev).toBe(2);
+    expect(host.log.slice(0, 3)).toEqual(['release', 'reload', 'snapshot']);
+    expect(host.log.slice(3).every((e) => e === 'net')).toBe(true); // обмен — уже с открытой базой
+    expect(host.log.length).toBeGreaterThan(3);
+    expect(existsSync(`${p.dbPath}.snapshot`)).toBe(false);
+    expect(await p.sync.localChanged()).toBe(true); // правка 333 не выложена
+    await a.pull();
+    expect(a.clientIds()).toEqual(['111', '222']);
+    await p.push();
+    await a.pull();
+    expect(a.clientIds()).toEqual(['111', '222', '333']);
+  });
+
+  test('в фоне без правок во время выгрузки база совпадает с выложенной', async () => {
+    await seed();
+    b.addClient('222');
+    expect(await backgroundPush(b.sync, host)).toBe(2);
+    expect(await b.sync.localChanged()).toBe(false); // побайтный снимок — та же сумма
+    expect(await b.status()).toBe('UP_TO_DATE');
+  });
+
+  test('в фоне незавершённая запись — снимка нет, база не закрывалась', async () => {
+    await seed();
+    b.addClient('222');
+    writeFileSync(`${b.dbPath}-journal`, '');
+    try {
+      expect(await backgroundPush(b.sync, host, () => host.log.push('snapshot'))).toBeNull();
+    } finally {
+      rmSync(`${b.dbPath}-journal`);
+    }
+    expect(host.log).toEqual([]); // отказ ещё до закрытия базы
+    expect(existsSync(`${b.dbPath}.snapshot`)).toBe(false);
   });
 
   test('повреждённый файл состояния не мешает проверке', async () => {
     await seed();
     writeFileSync(join(b.dir, 'sync_state.json'), '{broken');
     expect(await startupAction(b.sync)).toEqual({ kind: 'none' }); // содержимое совпадает
+  });
+});
+
+describe('обмен сразу после фоновой выгрузки', () => {
+  const base = { changed: true, active: true, externalOpen: 0, now: 1000, autoSyncAfter: 0 };
+
+  test('во время выгрузки база менялась — обмен сразу', () => {
+    expect(syncAfterBackground(base)).toBe(true);
+  });
+
+  test.each([
+    ['правок не было', { changed: false }],
+    ['приложение не на экране', { active: false }],
+    ['открыт выбор файла или «Поделиться»', { externalOpen: 1 }],
+    ['пауза после недоступного Диска', { autoSyncAfter: 2000 }],
+  ])('%s — обмена нет', (_name, over) => {
+    expect(syncAfterBackground({ ...base, ...over })).toBe(false);
   });
 });
