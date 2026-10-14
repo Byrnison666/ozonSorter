@@ -5,6 +5,8 @@
 прогон): вопросы пользователю и итоговые сообщения подменены, а тест задаёт,
 что «нажал» пользователь, и проверяет, какие сообщения он увидел.
 """
+import gzip
+import json
 import os
 import shutil
 import socket
@@ -26,7 +28,8 @@ from src.database import DatabaseManager
 from src.models import Client, DeliveryPoint
 from src.sync_config import SyncConfig, load_config, save_config
 from src.sync_service import (
-    CancelToken, RemoteMeta, SyncCancelled, SyncCheck, SyncError, SyncService, SyncStatus,
+    CancelToken, RemoteDataError, RemoteMeta, SyncCancelled, SyncCheck, SyncError, SyncService,
+    SyncStatus,
 )
 from src.ui import clients_screen, sync_flow
 from src.ui.main_window import MainWindow
@@ -576,6 +579,103 @@ class StartupCheckTest(SyncUiTestCase):
         self.server.token = "other-token"
         self._startup()
         self.assertTrue(any("не принял вход" in t for t in self._texts()))
+
+
+class GarbageResponseTest(SyncUiTestCase):
+    """Сбой в дата-центре Яндекса бывает не только 500: Диск отвечает «200 OK»
+    HTML-страницей, обрезанным архивом или файлом с чужой суммой. Тихие попытки
+    считают это недоступностью — отметка и пауза, без окон."""
+
+    def _startup(self):
+        self.window.startup_sync()
+        self._wait(lambda: self.window._startup_check is None)
+
+    def _newer_base_on_disk(self):
+        """Синхронизированы, затем другое устройство выложило новую версию."""
+        self.window.sync_now()
+        self._push_from_other("222")
+        self.messages.clear()
+
+    def _replace_current_revision(self, data):
+        meta = json.loads(self.server.files["/OzonSorter/meta.json"])
+        self.server.files["/OzonSorter/" + meta["file"]] = data
+
+    def _assert_quiet_unavailable(self):
+        self.assertEqual(self.messages, [])
+        self.assertIn(UNAVAILABLE, self._indicator())
+        self.assertGreater(self.window._auto_sync_after, time.monotonic())
+
+    def test_garbage_api_answer_on_change_is_silent_logged_and_paused(self):
+        self.window.on_data_changed()
+        _add_client(self.db_path, "222")
+        self.server.garbage_api = True
+        with self.assertLogs("src.ui.sync_flow", "WARNING"):
+            self.window.on_data_changed()
+        self._assert_quiet_unavailable()
+        self.assertIn(DIRTY, self._indicator())
+        self.assertEqual(_client_ids(self.db_path), ["111", "222"])
+        requests = len(self.server.requests)
+        _add_client(self.db_path, "333")
+        self.window.on_data_changed()
+        self.assertEqual(len(self.server.requests), requests)   # пауза: Диск не дёргаем
+
+    def test_garbage_meta_at_startup_is_silent_and_marked(self):
+        self.window.sync_now()
+        self.messages.clear()
+        self.server.garbage_gets = True
+        with self.assertLogs("src.ui.main_window", "WARNING"):
+            self._startup()
+        self._assert_quiet_unavailable()
+        self.assertIn(CLEAN, self._indicator())
+
+    def test_checksum_mismatch_on_quiet_pull_keeps_local_base(self):
+        self._newer_base_on_disk()
+        self._replace_current_revision(gzip.compress(b"not the base"))
+        self._startup()
+        self._assert_quiet_unavailable()
+        self.assertEqual(_client_ids(self.db_path), ["111"])
+
+    def test_broken_archive_on_quiet_pull_keeps_local_base(self):
+        self._newer_base_on_disk()
+        self._replace_current_revision(b"<html>502</html>")
+        self._startup()
+        self._assert_quiet_unavailable()
+        self.assertEqual(_client_ids(self.db_path), ["111"])
+
+    def test_manual_sync_shows_window_and_marks(self):
+        self.window.on_data_changed()
+        _add_client(self.db_path, "222")
+        self.server.garbage_api = True
+        self.assertFalse(self.window.sync_now(announce=True))
+        self.assertEqual([title for title, _t in self.messages], [UNAVAILABLE])
+        self.assertTrue(any("непонятный ответ" in t and "работать можно" in t
+                            for t in self._texts()))
+        self.assertIn(UNAVAILABLE, self._indicator())
+        self.server.garbage_api = False
+        self.assertTrue(self.window.sync_now())
+        self.assertNotIn(UNAVAILABLE, self._indicator())
+        self._push_from_other("333")
+        self.assertEqual(_client_ids(self.other_db), ["111", "222", "333"])
+
+    def test_manual_pull_with_bad_checksum_explains_local_work(self):
+        self._newer_base_on_disk()
+        self._replace_current_revision(gzip.compress(b"not the base"))
+        self.assertFalse(self.window.sync_now(announce=True))
+        self.assertEqual([title for title, _t in self.messages], [UNAVAILABLE])
+        self.assertTrue(any("контрольной суммой" in t and "работать можно" in t
+                            for t in self._texts()))
+        self.assertEqual(_client_ids(self.db_path), ["111"])
+
+    def test_glitch_classification(self):
+        self.assertTrue(sync_flow.is_disk_glitch(YaDiskError("html", 200)))
+        self.assertTrue(sync_flow.is_disk_glitch(YaDiskError("down", 503)))
+        self.assertTrue(sync_flow.is_disk_glitch(YaDiskError("offline")))
+        self.assertTrue(sync_flow.is_disk_glitch(RemoteDataError("broken")))
+        self.assertFalse(sync_flow.is_disk_glitch(YaDiskError("auth", 401)))
+        self.assertFalse(sync_flow.is_disk_glitch(YaDiskError("full", 507)))
+        self.assertFalse(sync_flow.is_disk_glitch(YaDiskError("tls", tls=True)))
+        self.assertFalse(sync_flow.is_disk_glitch(SyncError("other")))
+        self.assertFalse(YaDiskError("html", 200).is_unavailable)  # отдельный признак
 
 
 class CloseWindowTest(SyncUiTestCase):

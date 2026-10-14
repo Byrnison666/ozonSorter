@@ -14,7 +14,9 @@ API отвечает на все запросы, пока не сброшен в
 truncate_gets (скачивание обещает больше байт, чем отдаёт), async_ops (перенос
 и копирование — через фоновую операцию), auth_seen (Authorization запросов на
 выгрузку и скачивание), download_location (куда переадресует ссылка на
-скачивание вместо хранилища).
+скачивание вместо хранилища), garbage_api и garbage_gets (API либо хранилище
+отвечают 200 с HTML-страницей вместо данных — так выглядят сбои в
+дата-центрах Яндекса).
 """
 import itertools
 import json
@@ -23,6 +25,7 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 API = "/v1/disk"
+GARBAGE = b"<html><body><h1>502 Bad Gateway</h1></body></html>"
 
 
 class FakeYaDiskServer:
@@ -38,6 +41,8 @@ class FakeYaDiskServer:
         self.fail_ops = False
         self.offline = False
         self.truncate_gets = False
+        self.garbage_api = False
+        self.garbage_gets = False
         self.async_ops = False
         self.auth_seen = []      # Authorization запросов к ссылкам выгрузки/скачивания
         self.approved = False    # пользователь подтвердил код устройства
@@ -86,6 +91,8 @@ class FakeYaDiskServer:
                             return self._error(401, "UnauthorizedError")
                         if server.server_error is not None:
                             return self._error(server.server_error, "ServerError")
+                        if server.garbage_api:
+                            return self._reply(200, GARBAGE, "text/html")
                         forced = server.fail_next.pop(method, None)
                         if forced is not None:
                             return self._error(forced, "ForcedError")
@@ -211,6 +218,8 @@ class FakeYaDiskServer:
                 if path is None or path not in server.files:
                     return self._error(404, "NotFound")
                 data = server.files[path]
+                if server.garbage_gets:
+                    return self._reply(200, GARBAGE, "text/html")
                 if server.truncate_gets:
                     self.send_response(200)
                     self.send_header("Content-Length", str(len(data) + 50))

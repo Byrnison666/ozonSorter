@@ -73,6 +73,12 @@ class SyncError(Exception):
     """Синхронизацию нельзя выполнить; текст ошибки показывается пользователю."""
 
 
+class RemoteDataError(SyncError):
+    """Диск отдал испорченные данные: meta.json не разбирается, архив не
+    распаковывается, сумма не сходится. Так выглядят сбои в дата-центрах
+    Яндекса — тихие попытки считают это недоступностью Диска."""
+
+
 class SyncCancelled(Exception):
     """Пользователь отменил операцию до того, как она что-либо изменила."""
 
@@ -312,7 +318,7 @@ class SyncService:
         try:
             return _parse_meta(raw)
         except (ValueError, KeyError, TypeError, AttributeError) as e:
-            raise SyncError(f"Файл {META_NAME} на Диске повреждён.") from e
+            raise RemoteDataError(f"Файл {META_NAME} на Диске повреждён.") from e
 
     # --- операции ---
 
@@ -475,7 +481,7 @@ class SyncService:
         # Контрольная сумма лежит там же, где файл, и защищает только от порчи при
         # передаче; содержимое проверяет _validate_database ниже.
         if hashlib.sha256(raw).hexdigest() != meta.sha256:
-            raise SyncError("Файл базы на Диске не совпадает с контрольной суммой. Повторите позже.")
+            raise RemoteDataError("Файл базы на Диске не совпадает с контрольной суммой. Повторите позже.")
 
         tmp = self.db_path + ".sync-tmp"
         try:
@@ -520,7 +526,7 @@ class SyncService:
             with gzip.GzipFile(fileobj=io.BytesIO(packed)) as f:
                 raw = f.read(MAX_DB_BYTES + 1)
         except (OSError, EOFError, zlib.error) as e:
-            raise SyncError("Файл базы на Диске повреждён.") from e
+            raise RemoteDataError("Файл базы на Диске повреждён.") from e
         if len(raw) > MAX_DB_BYTES:
             raise SyncError("Файл базы на Диске слишком большой и не может быть загружен.")
         return raw

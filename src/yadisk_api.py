@@ -72,6 +72,13 @@ class YaDiskError(Exception):
         Пройдёт само — с базой можно работать локально и выложить её позже."""
         return self.is_network_error or (self.status is not None and _is_transient(self.status))
 
+    @property
+    def is_bad_response(self) -> bool:
+        """Диск ответил «успешно», но не тем (HTML-страница вместо JSON, нет
+        ссылки): так выглядят сбои в дата-центрах Яндекса. Отдельно от
+        is_unavailable — его смысл (5xx, нет связи) повторы чтения не меняют."""
+        return self.status is not None and 200 <= self.status < 300
+
 
 def is_secure_url(url: str) -> bool:
     parts = urllib.parse.urlsplit(url)

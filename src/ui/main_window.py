@@ -1,3 +1,4 @@
+import logging
 import os
 import time
 
@@ -12,7 +13,6 @@ from PySide2.QtWidgets import (
 from src.stale_service import ALERT_DAYS
 from src.sync_config import load_config
 from src.sync_service import SyncStatus
-from src.yadisk_api import YaDiskError
 
 from .dashboard_screen import DashboardScreen
 from .clients_screen import ClientsScreen
@@ -22,9 +22,11 @@ from .settings_screen import SettingsScreen, stop_login_threads
 from .stale_screen import StaleScreen
 from .theme import ASSETS_DIR, Colors, icon_label, icon_pixmap, set_button_icon
 from .sync_flow import (
-    BackgroundCheck, SyncAttempt, ask_yes_no, describe_error, has_local_changes,
+    BackgroundCheck, SyncAttempt, ask_yes_no, describe_error, has_local_changes, is_disk_glitch,
     last_sync_time, message_box, show_message, stop_pending_work, sync_interactive,
 )
+
+logger = logging.getLogger(__name__)
 
 
 NAV_STRUCTURE = [
@@ -232,7 +234,7 @@ class MainWindow(QMainWindow):
         card_layout.addWidget(self.sync_btn)
         layout.addWidget(self.sync_card)
 
-        footer = QLabel("v1.11.1")
+        footer = QLabel("v1.12.0")
         footer.setObjectName("sidebarFooter")
         layout.addWidget(footer)
 
@@ -381,9 +383,10 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(500, lambda: self._handle_startup_result(error, check))
             return
         if error is not None:
-            if isinstance(error, YaDiskError) and error.is_unavailable:
+            if is_disk_glitch(error):
                 # Работаем с локальной базой без окон; изменения выложит
                 # следующая удачная синхронизация.
+                logger.warning("Startup check: Disk is unavailable: %s", error)
                 self._note_disk_state(True)
                 return
             show_message(self, QMessageBox.Warning, "Синхронизация", describe_error(error))

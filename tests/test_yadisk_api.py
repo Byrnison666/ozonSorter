@@ -209,6 +209,17 @@ class YaDiskClientTest(unittest.TestCase):
         self.assertEqual([c.args[0] for c in sleep.call_args_list], [1.0, 2.0])
         self.assertEqual(len(self._paths("GET")), 3)
 
+    def test_html_page_instead_of_json_is_bad_response_not_retried(self):
+        # Сбой в дата-центре Яндекса: «200 OK» с HTML-страницей вместо JSON.
+        self.server.garbage_api = True
+        with mock.patch.object(yadisk_api.time, "sleep") as sleep:
+            with self.assertRaises(YaDiskError) as ctx:
+                self.client.get("OzonSorter/a.bin")
+        self.assertEqual(ctx.exception.status, 200)
+        self.assertTrue(ctx.exception.is_bad_response)
+        self.assertFalse(ctx.exception.is_unavailable)
+        sleep.assert_not_called()
+
     def test_write_request_is_not_retried(self):
         # Сервер мог успеть выполнить запись — повтор дал бы ложную ошибку.
         # Выгрузку безопасно отложить: meta.json пишется последним.

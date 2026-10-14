@@ -3,6 +3,7 @@
 когда он недоступен. Сеть работает в фоновом потоке; на время обмена окно
 закрыто модальным индикатором — базу в это время трогать нельзя.
 """
+import logging
 import socket
 import time
 from collections import deque
@@ -18,10 +19,13 @@ from PySide2.QtWidgets import (
 
 from src.sync_config import STATE_PATH, SyncConfig, save_config
 from src.sync_service import (
-    SAVED_AT_FORMAT, CancelToken, SyncCancelled, SyncError, SyncService, SyncStatus,
+    SAVED_AT_FORMAT, CancelToken, RemoteDataError, SyncCancelled, SyncError, SyncService,
+    SyncStatus,
 )
 from src.yadisk_api import YaDiskClient, YaDiskError
 from src.yandex_oauth import OAuthError, refresh_tokens
+
+logger = logging.getLogger(__name__)
 
 # Служебные запросы маленькие; передача файла базы может идти долго. Оба
 # таймаута — на одну сетевую операцию, а не на весь обмен.
@@ -100,6 +104,19 @@ def refresh_token_if_needed(config: SyncConfig, service: SyncService) -> None:
         pass  # новый токен проработает до перезапуска, потом обновится снова
 
 
+_WORK_LOCALLY = ("База сохранена на этом компьютере, работать можно — изменения "
+                 "выложатся, когда Диск заработает.")
+
+
+def is_disk_glitch(error: Exception) -> bool:
+    """Сбой Диска, который проходит сам: недоступность либо испорченный ответ
+    (так выглядят сбои в дата-центрах Яндекса). Тихие попытки считают его
+    недоступностью: отметка, пауза автосинхронизации, без окон."""
+    if isinstance(error, YaDiskError):
+        return error.is_unavailable or error.is_bad_response
+    return isinstance(error, RemoteDataError)
+
+
 def describe_error(error: Exception) -> str:
     """Текст ошибки для оператора."""
     if isinstance(error, YaDiskError):
@@ -118,9 +135,12 @@ def describe_error(error: Exception) -> str:
             return "На Яндекс.Диске закончилось место."
         if error.is_unavailable:
             return (f"Яндекс.Диск сейчас не работает (сбой на стороне Яндекса, код {error.status}).\n"
-                    "База сохранена на этом компьютере, работать можно — изменения "
-                    "выложатся, когда Диск заработает.")
+                    + _WORK_LOCALLY)
+        if error.is_bad_response:
+            return "Яндекс.Диск прислал непонятный ответ (сбой на стороне Яндекса).\n" + _WORK_LOCALLY
         return f"Яндекс.Диск ответил ошибкой {error.status}. Повторите позже."
+    if isinstance(error, RemoteDataError):
+        return f"{error}\n{_WORK_LOCALLY}"
     if isinstance(error, SyncError):
         return str(error)
     return f"Не удалось выполнить синхронизацию:\n{error}"
@@ -553,16 +573,17 @@ def sync_interactive(main_window, config: SyncConfig, announce: bool = False,
             result = synchronize(main_window, config, confirm_pull=confirm_pull)
         except SyncCancelled:
             return SyncAttempt.NOT_SYNCED
-        except YaDiskError as e:
-            if e.is_unavailable and quiet:
+        except (YaDiskError, RemoteDataError) as e:
+            if is_disk_glitch(e) and quiet:
+                logger.warning("Quiet sync: Disk is unavailable: %s", e)
                 return SyncAttempt.UNAVAILABLE
-            if e.is_network_error:
+            if isinstance(e, YaDiskError) and e.is_network_error:
                 if _ask_retry_offline(main_window, has_local_changes(main_window, config) is True,
                                       _probe_internet(main_window)):
                     was_offline = True
                     continue
                 return SyncAttempt.UNAVAILABLE
-            if e.is_unavailable:
+            if is_disk_glitch(e):
                 show_message(main_window, QMessageBox.Warning, "Яндекс.Диск недоступен",
                              describe_error(e))
                 return SyncAttempt.UNAVAILABLE
